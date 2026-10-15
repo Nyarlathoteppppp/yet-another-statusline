@@ -769,31 +769,44 @@ preflight_wire_only() {
 # under a piped (non-TTY) stdin.
 # If they prompt in practice, use the manual path:
 # ```
-# claude plugin marketplace add tmck-code/yet-another-statusline
+# claude plugin marketplace add tmck-code/yet-another-statusline#main
 # claude plugin install yas@yet-another-statusline
 # /yas:init
 # ```
 
 ensure_marketplace() {
     heading "Marketplace"
-    local present
+    local present branch MKT_CLONE
     present=$(json_py has-key "$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json" yet-another-statusline 2>/dev/null) || present="false"
+    MKT_CLONE="$CLAUDE_CONFIG_DIR/plugins/marketplaces/yet-another-statusline"
 
+    # `marketplace add` without a ref clones the GitHub default branch, and
+    # `marketplace update` refreshes whatever branch the clone is on. Pin main
+    # so a clone left on a feature branch is replaced, not updated in place.
     if [ "$present" = "true" ]; then
-        if [ "$DRY_RUN" = "1" ]; then
-            step "  Would update marketplace: yet-another-statusline"
-        else
-            step "  Updating marketplace…"
-            run_claude_green claude plugin marketplace update yet-another-statusline
+        branch=$(git -C "$MKT_CLONE" symbolic-ref --short -q HEAD 2>/dev/null || printf '')
+        if [ "$branch" = "main" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                step "  Would update marketplace: yet-another-statusline"
+            else
+                step "  Updating marketplace…"
+                run_claude_green claude plugin marketplace update yet-another-statusline
+            fi
+            return
         fi
-        return
+        if [ "$DRY_RUN" = "1" ]; then
+            step "  Would replace marketplace clone on branch '${branch:-unknown}' with main"
+            return
+        fi
+        step "  Replacing marketplace clone on branch '${branch:-unknown}' with main…"
+        run_claude_green claude plugin marketplace remove yet-another-statusline
     fi
 
     if [ "$DRY_RUN" = "1" ]; then
-        step "  Would add marketplace: tmck-code/yet-another-statusline"
+        step "  Would add marketplace: tmck-code/yet-another-statusline#main"
     else
         step "  Adding marketplace…"
-        run_claude_green claude plugin marketplace add tmck-code/yet-another-statusline
+        run_claude_green claude plugin marketplace add tmck-code/yet-another-statusline#main
     fi
 }
 
@@ -956,7 +969,7 @@ do_wire() {
 
         if [ -z "$PLUGIN_ROOT" ]; then
             fail "! yas plugin not found — install first:"
-            printf "    claude plugin marketplace add tmck-code/yet-another-statusline\n"
+            printf "    claude plugin marketplace add tmck-code/yet-another-statusline#main\n"
             printf "    claude plugin install yas@yet-another-statusline\n"
             exit 1
         fi

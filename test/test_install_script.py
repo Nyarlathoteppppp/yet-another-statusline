@@ -274,6 +274,10 @@ def test_dry_run_marketplace_already_present(full_dry_env):
     (config_dir / 'plugins' / 'known_marketplaces.json').write_text(
         json.dumps({'yet-another-statusline': {'url': 'x'}})
     )
+    # ensure_marketplace reads the clone's branch; a real install has a clone on main.
+    clone = config_dir / 'plugins' / 'marketplaces' / 'yet-another-statusline'
+    clone.mkdir(parents=True)
+    subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=clone, check=True)
     result = run_install('--full', '--dry-run', env_extra=env)
     assert result.returncode == 0, result.stderr
     combined = result.stdout.lower()
