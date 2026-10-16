@@ -4,6 +4,13 @@
 Creates a scene in the target collection and replaces its content with the file,
 or replaces the content of an existing scene with --scene-id. Stdlib only.
 
+Replace mechanics (--scene-id): the server merges a PUT by element id, so elements missing from
+the PUT survive. The script first GETs the live scene and appends a tombstone (isDeleted true,
+version + 1, fresh updated, fileId null) for every live id absent from the new build. Files come
+from the new build only. After the PUT it GETs the scene back and prints
+`element count: local N, live M` (tombstones excluded). It exits 1 if N and M differ or two live
+text elements in the same frame share a text.
+
 The API key is read from $EXCALIDRAW_API_KEY (or --api-key). Mint one in the
 Excalidraw+ workspace settings; it is shown exactly once.
 

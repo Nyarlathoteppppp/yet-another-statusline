@@ -1,4 +1,8 @@
-'Render an Excalidraw scene (image, text, freedraw) to a PNG with Pillow.'
+'''Render an Excalidraw scene (image, text, freedraw) to a PNG with Pillow.
+
+Stored ink is white (#ffffff). It is drawn as-is on a dark --bg (default: the scene canvas, else #121212)
+and as #1e1e1e on a light --bg (for example --bg white), so both stay readable.
+'''
 from __future__ import annotations
 
 import argparse
@@ -9,10 +13,11 @@ from pathlib import Path
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
-FONT_PATH   = Path(__file__).resolve().parent.parent / 'assets' / 'fonts' / 'Excalifont-Regular.ttf'
-DARK_STROKE = '#e3e3e8'
-STORED_DARK = {'#1e1e1e', '#000000', '#000'}
-SKIP_TYPES  = {'frame', 'magicframe'}
+FONT_PATH    = Path(__file__).resolve().parent.parent / 'assets' / 'fonts' / 'Excalifont-Regular.ttf'
+LIGHT_BG_INK = '#1e1e1e'
+DEFAULT_BG    = '#121212'
+STORED_WHITE = {'#ffffff', '#fff'}
+SKIP_TYPES   = {'frame', 'magicframe'}
 
 
 def live_elements(scene: dict) -> list[dict]:
@@ -36,10 +41,10 @@ def text_bounds(e: dict, font: ImageFont.FreeTypeFont) -> tuple[float, float, fl
 
 
 def stroke_colour(e: dict, bg: str) -> str:
-    colour = e.get('strokeColor', '#1e1e1e')
-    dark_bg = sum(ImageColor.getrgb(bg)) < 3 * 128
-    if dark_bg and colour.lower() in STORED_DARK:
-        return DARK_STROKE
+    colour = e.get('strokeColor', '#ffffff')
+    light_bg = sum(ImageColor.getrgb(bg)) >= 3 * 128
+    if light_bg and colour.lower() in STORED_WHITE:
+        return LIGHT_BG_INK
     return colour
 
 
@@ -97,12 +102,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('scene')
     ap.add_argument('out')
-    ap.add_argument('--bg', default='#121212')
+    ap.add_argument('--bg', default=None, help='canvas colour (default: scene appState.viewBackgroundColor, else #121212)')
     ap.add_argument('--pad', type=float, default=40)
     ap.add_argument('--scale', type=float, default=2.0)
     args = ap.parse_args()
     scene = json.loads(Path(args.scene).read_text())
-    img   = render(scene, args.bg, args.pad, args.scale)
+    bg    = args.bg or scene.get('appState', {}).get('viewBackgroundColor') or DEFAULT_BG
+    img   = render(scene, bg, args.pad, args.scale)
     img.save(args.out)
     print(f'{args.out} {img.width}x{img.height}')
 

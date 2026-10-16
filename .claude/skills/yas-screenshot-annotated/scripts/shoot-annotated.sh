@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render a demo scenario, build the annotated Excalidraw scene for one view preset,
-# and upload it to the Excalidraw+ "generated" collection.
+# and upload it to the Excalidraw+ "yas!" collection.
 #
 #   shoot-annotated.sh <view> [scene-name]
 #
@@ -9,9 +9,14 @@
 #
 # Env:
 #   NO_UPLOAD=1      build the .excalidraw file only
-#   COLLECTION=...   Excalidraw+ collection name or id (default: generated)
-#   SCENE_ID=...     replace that existing scene in place (keeps its links valid);
-#                    COLLECTION and scene-name are ignored. Default: create a new scene.
+#   COLLECTION=...   Excalidraw+ collection name or id (default: yas!)
+#   SCENE_ID=...     scene id precedence (first match wins):
+#                      1. env SCENE_ID, if set
+#                      2. "scene_id" in assets/views/<view>.json, if present
+#                      3. otherwise create a new scene in COLLECTION
+#                    A resolved id replaces that existing scene in place (keeps its links
+#                    valid); COLLECTION and scene-name are then ignored.
+#                    SCENE_ID=new skips the preset id and forces a new scene.
 #   SCALE=1.0        passed to annotate.py --scale
 #   YAS_DEMO_*       passed through to ops/ansi_png.py (font, size, pad, dpi, colours)
 #   EXCALIDRAW_API_KEY  required for the upload; never written to disk
@@ -54,17 +59,23 @@ python3 "$here/annotate.py" \
   --pad   "${YAS_DEMO_PAD:-24}" \
   --scale "${SCALE:-1.0}"
 
-[ -z "${NO_UPLOAD:-}" ] || { echo "NO_UPLOAD set: $out_dir/$view.excalidraw"; exit 0; }
+# Resolve the scene id (see the SCENE_ID header above); "new" means create a scene.
+scene_id=${SCENE_ID:-$(jq -r '.scene_id // empty' "$spec")}
+[ "$scene_id" != new ] || scene_id=
+[ -z "${NO_UPLOAD:-}" ] || {
+  echo "scene id: ${scene_id:-new}" >&2
+  echo "NO_UPLOAD set: $out_dir/$view.excalidraw"; exit 0
+}
 
 # 3. Upload (or replace in place) and print the scene URL.
-# With SCENE_ID, upload_scene.py tombstones live elements missing from the new build and
+# With a scene id, upload_scene.py tombstones live elements missing from the new build and
 # checks the live element count against the local count (exit 1 on mismatch).
 rc=0
-if [ -n "${SCENE_ID:-}" ]; then
-  log=$(python3 "$here/upload_scene.py" "$out_dir/$view.excalidraw" --scene-id "$SCENE_ID") || rc=$?
+if [ -n "$scene_id" ]; then
+  log=$(python3 "$here/upload_scene.py" "$out_dir/$view.excalidraw" --scene-id "$scene_id") || rc=$?
 else
   log=$(python3 "$here/upload_scene.py" "$out_dir/$view.excalidraw" \
-    --collection "${COLLECTION:-generated}" --name "$name") || rc=$?
+    --collection "${COLLECTION:-yas!}" --name "$name") || rc=$?
 fi
 echo "$log"
 [ "$rc" -eq 0 ] || { echo "upload check failed (exit $rc)" >&2; exit "$rc"; }

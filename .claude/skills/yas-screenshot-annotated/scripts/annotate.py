@@ -2,7 +2,7 @@
 '''Build an Excalidraw scene: a YAS statusline PNG in a frame, with hand-style labels and pointers.
 
 Stdlib only. The scene follows the style of the user's own annotated screenshots:
-Excalifont text (fontFamily 5, size 16), thin #1e1e1e freedraw pointer lines, one #bbb frame.
+Excalifont text (fontFamily 5, size 16), thin white (#ffffff) freedraw pointer lines, one #bbb frame.
 
   annotate.py --txt demo/openspec.txt --dump-grid
   annotate.py --png demo/openspec.png --txt demo/openspec.txt \
@@ -35,7 +35,8 @@ RESET  = '\033[0m'
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
-INK           = '#1e1e1e'
+INK           = '#ffffff'
+CANVAS_BG     = '#121212'
 FRAME_STROKE  = '#bbb'
 FONT_FAMILY   = 5
 BASE_FONT     = 16
@@ -413,7 +414,7 @@ def build(args: argparse.Namespace) -> int:
         'version':  2,
         'source':   'https://app.excalidraw.com',
         'elements': elements,
-        'appState': {'viewBackgroundColor': '#ffffff'},
+        'appState': {'viewBackgroundColor': CANVAS_BG},
         'files':    {file_id: {'mimeType': 'image/png', 'id': file_id, 'dataURL': data_url, 'created': scene.now}},
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

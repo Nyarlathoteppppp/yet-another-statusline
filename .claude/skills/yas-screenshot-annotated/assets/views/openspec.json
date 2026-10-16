@@ -1,5 +1,6 @@
 {
   "scenario": "openspec",
+  "scene_id": "v1MVvkrbxh",
   "frame": "openspec view",
   "labels": [
     {"text": "repo dir/git info", "side": "above", "anchor": {"regex": "~/\\S+ ∈ \\S+", "offset": [-10, 0]}},
