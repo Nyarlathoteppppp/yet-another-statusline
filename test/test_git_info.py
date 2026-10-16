@@ -1,5 +1,4 @@
 """Tests for GitInfo._find_repo, _read_head, and from_cwd."""
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,14 +6,6 @@ from pathlib import Path
 import pytest
 
 import yas.info.git as git
-
-
-@pytest.fixture(autouse=True)
-def _clean_git_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drop GIT_* vars that git exports to hooks (GIT_DIR, GIT_INDEX_FILE, ...) so tmp repos are not redirected."""
-    for key in [k for k in os.environ if k.startswith('GIT_')]:
-        monkeypatch.delenv(key)
-
 
 
 def _make_git_dir(base: Path, branch: str = 'main', commit: str = 'abcdef1234567890') -> Path:
