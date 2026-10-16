@@ -4,14 +4,54 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from yas.constants import CACHE_TTL_1H_SECONDS, CACHE_TTL_SECONDS
+from yas.info.parsecache import fold_file
 
 if TYPE_CHECKING:
     from yas.info.parsecache import TranscriptCache
+
+
+def _usage_init() -> dict[str, Any]:
+    return {'ids': {}, 'ts': '', 'h1': False}
+
+
+def _usage_fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
+    """Fold assistant usage lines in; the last record per message id wins.
+
+    Streaming re-writes the same id as it appends content blocks and the
+    counters GROW across those writes, so the final one carries the real
+    totals. The cache anchor is the last line (any id) that touched the cache.
+    """
+    ids = state['ids']
+    for raw in lines:
+        if b'"usage"' not in raw or b'"assistant"' not in raw:
+            continue
+        try:
+            d = json.loads(raw.decode('utf-8', 'ignore'))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        msg = d.get('message') or {}
+        mid = msg.get('id')
+        if not mid:
+            continue
+        u = msg.get('usage') or {}
+        ids[mid] = [
+            u.get('input_tokens', 0) or 0,
+            u.get('cache_creation_input_tokens', 0) or 0,
+            u.get('cache_read_input_tokens', 0) or 0,
+            u.get('output_tokens', 0) or 0,
+        ]
+        if ids[mid][2] > 0 or ids[mid][1] > 0:
+            state['ts'] = d.get('timestamp', '') or ''
+            state['h1'] = bool((u.get('cache_creation') or {}).get('ephemeral_1h_input_tokens', 0))
+    return state
 
 
 class TranscriptUsage:
@@ -75,71 +115,45 @@ class TranscriptUsage:
                 f'cache_anchor_epoch={self.cache_anchor_epoch}, cache_ttl={self.cache_ttl})')
 
     @classmethod
-    def from_transcript(cls, transcript_path: str) -> TranscriptUsage:
+    def from_transcript(
+        cls,
+        transcript_path: str,
+        *,
+        cache: 'TranscriptCache | None' = None,
+    ) -> TranscriptUsage:
         if not transcript_path:
             return cls()
-        p = Path(transcript_path)
-        if not p.is_file():
-            return cls()
-        # Usage is keyed by message id with last-line-wins: streaming re-writes
-        # the same id as it appends content blocks, and the usage counters GROW
-        # across those writes — the final one carries the message's real totals.
-        # A first-write dedup freezes usage at the first partial snapshot and
-        # undercounts output tokens.
-        usage_by_id: dict[str, tuple[int, int, int, int]] = {}
-        _cache_anchor_ts: str  = ''
-        _cache_1h:        bool = False
         try:
-            with p.open('r', errors='ignore') as fh:
-                for ln in fh:
-                    if '"usage"' not in ln or '"assistant"' not in ln:
-                        continue
-                    try:
-                        d = json.loads(ln)
-                    except (ValueError, TypeError):
-                        continue
-                    msg = d.get('message') or {}
-                    mid = msg.get('id')
-                    if not mid:
-                        continue
-                    u = msg.get('usage') or {}
-                    usage_by_id[mid] = (
-                        u.get('input_tokens', 0) or 0,
-                        u.get('cache_creation_input_tokens', 0) or 0,
-                        u.get('cache_read_input_tokens', 0) or 0,
-                        u.get('output_tokens', 0) or 0,
-                    )
-                    if (u.get('cache_read_input_tokens', 0) or 0) > 0 or \
-                            (u.get('cache_creation_input_tokens', 0) or 0) > 0:
-                        _cache_anchor_ts = d.get('timestamp', '') or ''
-                        _cache_1h        = bool(
-                            (u.get('cache_creation') or {})
-                            .get('ephemeral_1h_input_tokens', 0)
-                        )
+            st = os.stat(transcript_path)
         except OSError:
             return cls()
-        ti = sum(vals[0] for vals in usage_by_id.values())
-        cc = sum(vals[1] for vals in usage_by_id.values())
-        cr = sum(vals[2] for vals in usage_by_id.values())
-        to = sum(vals[3] for vals in usage_by_id.values())
+        if not stat.S_ISREG(st.st_mode):
+            return cls()
+        state = fold_file(cache, transcript_path, st, 'usage', '', _usage_init, _usage_fold)
+        return cls._from_state(state)
+
+    @classmethod
+    def _from_state(cls, state: dict[str, Any]) -> TranscriptUsage:
+        vals = state['ids'].values()
+        anchor_ts = state['ts']
         cache_anchor_epoch = 0.0
-        if _cache_anchor_ts:
+        if anchor_ts:
             try:
-                ts = _cache_anchor_ts
+                ts = anchor_ts
                 if ts.endswith('Z'):
                     ts = ts[:-1] + '+00:00'
                 cache_anchor_epoch = datetime.fromisoformat(ts).timestamp()
             except (ValueError, TypeError):
                 cache_anchor_epoch = 0.0
         cache_ttl = (
-            CACHE_TTL_1H_SECONDS if _cache_1h
-            else (CACHE_TTL_SECONDS if _cache_anchor_ts else 0)
+            CACHE_TTL_1H_SECONDS if state['h1']
+            else (CACHE_TTL_SECONDS if anchor_ts else 0)
         )
         return cls(
-            input_tokens                = ti,
-            cache_creation_input_tokens = cc,
-            cache_read_input_tokens     = cr,
-            output_tokens               = to,
+            input_tokens                = sum(v[0] for v in vals),
+            cache_creation_input_tokens = sum(v[1] for v in vals),
+            cache_read_input_tokens     = sum(v[2] for v in vals),
+            output_tokens               = sum(v[3] for v in vals),
             cache_anchor_epoch          = cache_anchor_epoch,
             cache_ttl                   = cache_ttl,
         )
@@ -190,25 +204,8 @@ class TranscriptUsage:
 
     @classmethod
     def _from_transcript_cached(cls, path: str, cache: 'TranscriptCache | None') -> TranscriptUsage:
-        """`from_transcript`, routed through `cache` when supplied.
-
-        A render can touch several subagent files (~1.4 MB combined on a
-        coordinator-heavy session); without caching that's a full re-parse
-        every tick. Keyed by path + (mtime, size), same staleness contract
-        as the other TranscriptCache consumers (e.g. `toolcounts.py`).
-        """
-        if cache is None:
-            return cls.from_transcript(path)
-        try:
-            st = os.stat(path)
-        except OSError:
-            return cls.from_transcript(path)
-        cached = cache.get_usage(path, st)
-        if cached is not None:
-            return cached
-        usage = cls.from_transcript(path)
-        cache.put_usage(path, st, usage)
-        return usage
+        """`from_transcript` for a subagent file, resumed from the fold cache."""
+        return cls.from_transcript(path, cache=cache)
 
     @property
     def billed_in(self) -> int:

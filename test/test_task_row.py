@@ -358,7 +358,7 @@ def test_task_row_compact_timer_truncates_left_no_overflow() -> None:
 def _render(monkeypatch: pytest.MonkeyPatch, builder, tasks: tasks_mod.TaskList, width: int) -> str:
     monkeypatch.setattr(
         tasks_mod.TaskList, 'from_session',
-        classmethod(lambda cls, transcript_path: tasks),
+        classmethod(lambda cls, transcript_path, **kwargs: tasks),
     )
     session = session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
     view    = SessionView(session, Config())

@@ -138,9 +138,9 @@ def test_render_and_rate_limit_sim_parse_the_transcript_exactly_once(tmp_home: P
     calls = []
     real_from_transcript = TranscriptUsage.from_transcript
 
-    def _counting(path: str) -> TranscriptUsage:
+    def _counting(path: str, **kwargs) -> TranscriptUsage:
         calls.append(path)
-        return real_from_transcript(path)
+        return real_from_transcript(path, **kwargs)
 
     monkeypatch.setattr(TranscriptUsage, 'from_transcript', staticmethod(_counting))
 

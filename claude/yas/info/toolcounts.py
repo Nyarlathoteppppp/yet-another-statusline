@@ -85,9 +85,10 @@ import os
 import re
 import shlex
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from yas.constants import META_EXCLUDE_TOOLS
-from yas.info.parsecache import TranscriptCache
+from yas.info.parsecache import TranscriptCache, fold_file
 from yas.info.subagents import RunningSubagent, _parse_iso_to_epoch
 
 # Matches a cat -n style leading line number (any starting offset, not just
@@ -211,6 +212,186 @@ class TranscriptToolStats:
     lines_changed: int
 
 
+def _nl(s: object) -> int:
+    """Count newlines in a string, or 0 if not a string."""
+    return s.count('\n') if isinstance(s, str) else 0
+
+
+def _init_state() -> dict[str, Any]:
+    """Fresh fold state. Id sets are dicts (id -> 1) so they survive JSON."""
+    return {
+        'per_id':              {},  # message.id -> tool names (last line wins)
+        'per_id_changed':      {},  # message.id -> lines changed (last wins)
+        'read_ids':            {},  # Read tool_use ids, for tool_result pairing
+        'designsync_read_ids': {},  # DesignSync get_file tool_use ids
+        'counted_read_ids':    {},  # ids whose tool_result already counted
+        'bash_read_ids':       {},  # Bash read tool_use ids
+        'bash_pending':        {},  # subset of bash_read_ids awaiting a result
+        'lines_read':          0,
+    }
+
+
+def _make_fold(
+    clear_epoch: float | None, skip_sidechain: bool,
+) -> Callable[[dict[str, Any], list[bytes]], dict[str, Any]]:
+    """Build the fold callable for one (clear_epoch, skip_sidechain) variant."""
+
+    def fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
+        per_id = state['per_id']
+        per_id_changed = state['per_id_changed']
+        read_ids = state['read_ids']
+        designsync_read_ids = state['designsync_read_ids']
+        counted_read_ids = state['counted_read_ids']
+        bash_read_ids = state['bash_read_ids']
+        bash_pending = state['bash_pending']
+        lines_read = state['lines_read']
+        # Bytes view of the pending ids for the cheap pre-filter below.
+        pending_bytes = {k.encode() for k in bash_pending}
+
+        for raw in lines:
+            # Pre-filters: decide before json.loads.
+            # (a) skip lines lacking both tool_use and tool_result
+            if b'"tool_use"' not in raw and b'"tool_result"' not in raw:
+                continue
+
+            # (b) tool_result without tool_use needs a cat -n digit-tab marker
+            #     (native Read, any start offset), the DesignSync get_file
+            #     marker, or a pending Bash read id.
+            if b'"tool_result"' in raw and b'"tool_use"' not in raw:
+                if (
+                    not _CAT_N_PREFIX_BYTES_RE.search(raw)
+                    and b'get_file' not in raw
+                    and not any(b in raw for b in pending_bytes)
+                ):
+                    continue
+
+            # (c) reject sidechain records before decoding.
+            if skip_sidechain:
+                if b'"isSidechain":true' in raw or b'"isSidechain": true' in raw:
+                    continue
+
+            try:
+                d = json.loads(raw)
+                msg = d.get('message') or {}
+
+                # Clear_epoch guard applies to every record.
+                if clear_epoch is not None:
+                    ts = d.get('timestamp', '') or ''
+                    if _parse_iso_to_epoch(ts) < clear_epoch:
+                        continue
+
+                # tool_result blocks live on user-role lines that carry no
+                # message.id, so this walk is independent of `mid`. Matching
+                # uses the persisted id maps, so a result in a later chunk
+                # than its tool_use still pairs.
+                for block in msg.get('content') or []:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get('type') != 'tool_result':
+                        continue
+                    tool_use_id: Any = block.get('tool_use_id')
+                    if tool_use_id in counted_read_ids:
+                        continue
+                    content = block.get('content')
+                    if tool_use_id in read_ids:
+                        if isinstance(content, str) and _CAT_N_PREFIX_RE.match(content):
+                            lines_read += content.count('\n')
+                        counted_read_ids[tool_use_id] = 1
+                    elif tool_use_id in designsync_read_ids:
+                        # JSON string {"method":"get_file",...,"content":...};
+                        # skip on any shape mismatch (e.g. truncation wrapper).
+                        if isinstance(content, str):
+                            try:
+                                parsed = json.loads(content)
+                            except (ValueError, TypeError):
+                                parsed = None
+                            if isinstance(parsed, dict):
+                                file_text = parsed.get('content')
+                                if isinstance(file_text, str):
+                                    lines_read += (
+                                        file_text.count('\n') + 1 if file_text else 0
+                                    )
+                        counted_read_ids[tool_use_id] = 1
+                    elif tool_use_id in bash_read_ids:
+                        if isinstance(content, str):
+                            lines_read += content.count('\n')
+                        counted_read_ids[tool_use_id] = 1
+                        bash_pending.pop(tool_use_id, None)
+                        pending_bytes.discard(tool_use_id.encode())
+
+                # The mid guard only protects tool_use-side accounting.
+                mid = msg.get('id')
+                if not mid:
+                    continue
+
+                names: list[str] = []
+                id_changed = 0
+
+                for block in msg.get('content') or []:
+                    if not isinstance(block, dict):
+                        continue
+
+                    if block.get('type') == 'tool_use':
+                        name = block.get('name') or ''
+                        if not name:
+                            continue
+                        name = name.split('__')[-1]  # MCP normalization
+                        if name in META_EXCLUDE_TOOLS:
+                            continue
+                        names.append(name)
+
+                        if name == 'Read':
+                            block_id = block.get('id')
+                            if block_id:
+                                read_ids[block_id] = 1
+                        elif name == 'DesignSync':
+                            inp = block.get('input') or {}
+                            if inp.get('method') == 'get_file':
+                                block_id = block.get('id')
+                                if block_id:
+                                    designsync_read_ids[block_id] = 1
+                        elif name == 'Edit':
+                            inp = block.get('input') or {}
+                            id_changed += max(
+                                _nl(inp.get('old_string')), _nl(inp.get('new_string'))
+                            )
+                        elif name == 'MultiEdit':
+                            inp = block.get('input') or {}
+                            for edit in inp.get('edits') or []:
+                                if not isinstance(edit, dict):
+                                    continue
+                                id_changed += max(
+                                    _nl(edit.get('old_string')),
+                                    _nl(edit.get('new_string')),
+                                )
+                        elif name == 'Bash':
+                            inp = block.get('input') or {}
+                            is_read, written = _classify_bash(inp.get('command'))
+                            id_changed += written
+                            block_id = block.get('id')
+                            if is_read and block_id:
+                                bash_read_ids[block_id] = 1
+                                if block_id not in counted_read_ids:
+                                    bash_pending[block_id] = 1
+                                    pending_bytes.add(block_id.encode())
+                        elif name == 'Write':
+                            inp = block.get('input') or {}
+                            id_changed += _nl(inp.get('content'))
+                        # NotebookEdit is not counted.
+
+                # Last-write-wins per message.id, also across chunks.
+                per_id[mid] = names
+                per_id_changed[mid] = id_changed
+
+            except (ValueError, TypeError):
+                continue
+
+        state['lines_read'] = lines_read
+        return state
+
+    return fold
+
+
 def count_transcript(
     path: str,
     clear_epoch: float | None,
@@ -230,254 +411,34 @@ def count_transcript(
     skipped; when False, they are counted in full. This asymmetry is deliberate:
     see the module docstring.
 
+    The walk is an incremental fold (``fold_file``): with a cache only bytes
+    appended since the last call are parsed, and the persisted state carries
+    every id map so the result equals a full parse.
+
     Never raises; an unreadable/malformed file yields empty counts and zeros.
     """
+    empty = TranscriptToolStats(counts={}, lines_read=0, lines_changed=0)
     if not path:
-        return TranscriptToolStats(counts={}, lines_read=0, lines_changed=0)
-
-    # Attempt cache hit when cache is present (Task 4.1).
-    if cache is not None:
-        try:
-            st = st or os.stat(path)
-        except OSError:
-            st = None
-        if st is not None:
-            cached = cache.get_counts(path, st, clear_epoch, skip_sidechain)
-            if cached is not None:
-                cached_counts = cached['counts']
-                cached_lines_read = cached['lines_read']
-                cached_lines_changed = cached['lines_changed']
-                if (
-                    isinstance(cached_counts, dict)
-                    and isinstance(cached_lines_read, int)
-                    and isinstance(cached_lines_changed, int)
-                ):
-                    return TranscriptToolStats(
-                        counts=cached_counts,
-                        lines_read=cached_lines_read,
-                        lines_changed=cached_lines_changed,
-                    )
-
-    def _nl(s: object) -> int:
-        """Count newlines in a string, or 0 if not a string."""
-        return s.count('\n') if isinstance(s, str) else 0
-
-    # message.id -> tool names from the most recent line seen for that id.
-    per_id: dict[str, list[str]] = {}
-    # message.id -> total lines_changed from all Edit/Write in that id.
-    per_id_changed: dict[str, int] = {}
-    # tool_use id -> True for each Read seen; used to match tool_result.
-    read_ids: set[str] = set()
-    # tool_use id -> True for each DesignSync get_file call seen; matched
-    # against tool_result the same way, but the result is a JSON string
-    # rather than a cat -n blob (see the DesignSync branch below).
-    designsync_read_ids: set[str] = set()
-    # tool_use_id -> True once its tool_result has contributed to lines_read,
-    # so a retransmitted/duplicate tool_result can't double-count.
-    counted_read_ids: set[str] = set()
-    # Bash read tool_use ids, and the pending subset as bytes so the byte
-    # pre-filter can let their (cat -n-less) tool_result lines through.
-    bash_read_ids: set[str] = set()
-    bash_pending: set[bytes] = set()
-    lines_read = 0
-    lines_changed = 0
-
+        return empty
     try:
-        with open(path, 'rb') as fh:
-            for raw in fh:
-                # V2 pre-filters (Decision 6): filter before json.loads.
-
-                # (a) skip lines lacking both tool_use and tool_result
-                if b'"tool_use"' not in raw and b'"tool_result"' not in raw:
-                    continue
-
-                # (b) if line has tool_result but not tool_use, require either
-                #     a cat -n style digit-tab marker (JSON-escaped as e.g.
-                #     '500\t', native Read — numbering may start at any
-                #     offset, not just line 1) or the DesignSync get_file
-                #     marker, or a pending Bash read id, before decoding.
-                if b'"tool_result"' in raw and b'"tool_use"' not in raw:
-                    if (
-                        not _CAT_N_PREFIX_BYTES_RE.search(raw)
-                        and b'get_file' not in raw
-                        and not any(b in raw for b in bash_pending)
-                    ):
-                        continue
-
-                # (c) if skip_sidechain, reject sidechain records before decoding.
-                if skip_sidechain:
-                    if b'"isSidechain":true' in raw or b'"isSidechain": true' in raw:
-                        continue
-
-                try:
-                    d = json.loads(raw)
-                    msg = d.get('message') or {}
-
-                    # Clear_epoch guard: the single window for both tool counts
-                    # and line counts (Decision 4). Applied to every record,
-                    # tool_use and tool_result alike, before either walk below.
-                    if clear_epoch is not None:
-                        ts = d.get('timestamp', '') or ''
-                        if _parse_iso_to_epoch(ts) < clear_epoch:
-                            continue
-
-                    # Walk tool_result blocks to extract lines_read (Decision 6).
-                    # This runs unconditionally, independent of message.id: a
-                    # tool_result always lives on a user-role message, which in
-                    # real transcripts never carries a message.id at all — gating
-                    # this walk on `mid` (as tool_use accounting does) would skip
-                    # every tool_result, unconditionally. Keyed only on
-                    # tool_use_id membership in read_ids, which the tool_use walk
-                    # below populates from assistant-role lines that always
-                    # precede the matching tool_result in the file (Decision 7).
-                    for block in msg.get('content') or []:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get('type') != 'tool_result':
-                            continue
-                        tool_use_id = block.get('tool_use_id')
-                        if tool_use_id in counted_read_ids:
-                            continue
-                        content = block.get('content')
-                        if tool_use_id in read_ids:
-                            # Only count if content is a string starting with
-                            # a cat -n style digit-tab prefix (Decision 2).
-                            # The numbering may start at any offset, not just
-                            # line 1 (Read(offset=N) numbers from N).
-                            if isinstance(content, str) and _CAT_N_PREFIX_RE.match(
-                                content
-                            ):
-                                lines_read += content.count('\n')
-                            counted_read_ids.add(tool_use_id)
-                        elif tool_use_id in designsync_read_ids:
-                            # DesignSync's result is a JSON string shaped like
-                            # {"method":"get_file","path":...,"content":...}
-                            # rather than a cat -n blob. Parse it and count
-                            # newlines in the .content field; skip (don't
-                            # crash) on any shape mismatch, e.g. a
-                            # <persisted-output> wrapper from truncation.
-                            if isinstance(content, str):
-                                try:
-                                    parsed = json.loads(content)
-                                except (ValueError, TypeError):
-                                    parsed = None
-                                if isinstance(parsed, dict):
-                                    file_text = parsed.get('content')
-                                    if isinstance(file_text, str):
-                                        lines_read += (
-                                            file_text.count('\n') + 1
-                                            if file_text
-                                            else 0
-                                        )
-                            counted_read_ids.add(tool_use_id)
-                        elif tool_use_id in bash_read_ids:
-                            if isinstance(content, str):
-                                lines_read += content.count('\n')
-                            counted_read_ids.add(tool_use_id)
-                            bash_pending.discard(tool_use_id.encode())
-
-                    # The mid guard below only protects the tool_use-side
-                    # accounting (`counts`, `lines_changed` via per_id /
-                    # per_id_changed last-write-wins dedup) — tool_result
-                    # records legitimately have no message.id and must not be
-                    # gated by this check.
-                    mid = msg.get('id')
-                    if not mid:
-                        continue
-
-                    names: list[str] = []
-                    id_changed = 0
-
-                    # Walk tool_use blocks to record tool names and file activity.
-                    for block in msg.get('content') or []:
-                        if not isinstance(block, dict):
-                            continue
-
-                        if block.get('type') == 'tool_use':
-                            name = block.get('name') or ''
-                            if not name:
-                                continue
-                            name = name.split('__')[-1]  # MCP normalization
-                            if name in META_EXCLUDE_TOOLS:
-                                continue
-                            names.append(name)
-
-                            # Record file-activity per block (Decision 5).
-                            if name == 'Read':
-                                # Remember Read ids for tool_result pairing.
-                                block_id = block.get('id')
-                                if block_id:
-                                    read_ids.add(block_id)
-                            elif name == 'DesignSync':
-                                # Only method 'get_file' is a read; other
-                                # methods (e.g. list_files) are not.
-                                inp = block.get('input') or {}
-                                if inp.get('method') == 'get_file':
-                                    block_id = block.get('id')
-                                    if block_id:
-                                        designsync_read_ids.add(block_id)
-                            elif name == 'Edit':
-                                # lines_changed += max(old_string, new_string)
-                                inp = block.get('input') or {}
-                                old = inp.get('old_string')
-                                new = inp.get('new_string')
-                                id_changed += max(_nl(old), _nl(new))
-                            elif name == 'MultiEdit':
-                                inp = block.get('input') or {}
-                                for edit in inp.get('edits') or []:
-                                    if not isinstance(edit, dict):
-                                        continue
-                                    id_changed += max(
-                                        _nl(edit.get('old_string')),
-                                        _nl(edit.get('new_string')),
-                                    )
-                            elif name == 'Bash':
-                                inp = block.get('input') or {}
-                                is_read, written = _classify_bash(inp.get('command'))
-                                id_changed += written
-                                block_id = block.get('id')
-                                if is_read and block_id:
-                                    bash_read_ids.add(block_id)
-                                    if block_id not in counted_read_ids:
-                                        bash_pending.add(block_id.encode())
-                            elif name == 'Write':
-                                # lines_changed += content
-                                inp = block.get('input') or {}
-                                content = inp.get('content')
-                                id_changed += _nl(content)
-                            # Note: NotebookEdit is not counted (Decision 1).
-
-                    # Last-write-wins dedup: replace per message.id and sum
-                    # at the end (Decision 8).
-                    per_id[mid] = names
-                    per_id_changed[mid] = id_changed
-
-                except (ValueError, TypeError):
-                    continue
+        st = st or os.stat(path)
     except OSError:
-        return TranscriptToolStats(counts={}, lines_read=0, lines_changed=0)
+        return empty
 
-    # Sum tool counts and lines_changed across the final per-id state.
-    counts: dict[str, int] = {}
-    for names in per_id.values():
-        for name in names:
-            counts[name] = counts.get(name, 0) + 1
-    lines_changed = sum(per_id_changed.values())
-
-    result = TranscriptToolStats(
-        counts=counts,
-        lines_read=lines_read,
-        lines_changed=lines_changed,
+    state = fold_file(
+        cache, path, st, 'toolcounts', f'{clear_epoch!r}|{int(skip_sidechain)}',
+        _init_state, _make_fold(clear_epoch, skip_sidechain),
     )
 
-    # Cache the result when cache is present and we have stat info (Task 4.1).
-    if cache is not None and st is not None:
-        cache.put_counts(
-            path, st, clear_epoch, skip_sidechain,
-            {'counts': result.counts, 'lines_read': result.lines_read, 'lines_changed': result.lines_changed},
-        )
-
-    return result
+    counts: dict[str, int] = {}
+    for names in state['per_id'].values():
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+    return TranscriptToolStats(
+        counts=counts,
+        lines_read=state['lines_read'],
+        lines_changed=sum(state['per_id_changed'].values()),
+    )
 
 
 class ToolCounts:

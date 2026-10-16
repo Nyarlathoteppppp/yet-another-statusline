@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
-VERSION    = '0.9.7'
+VERSION    = '0.9.8'
 # Bumped by any future on-disk relayout under yas/; stamped into
 # state/version.json by yas.migrate so a future migration can detect and
 # convert an older layout.
@@ -132,7 +132,7 @@ DEFAULT_LABELS         = False
 DEFAULT_CONTEXT_STATE      = False
 DEFAULT_CONTEXT_LABELS:     tuple[str, ...] = ('Smart', 'Coasting', 'Foggy', 'Cooked', 'Dumb')
 DEFAULT_CONTEXT_THRESHOLDS: tuple[int, ...] = (25, 50, 70, 90)
-TRANSCRIPT_CACHE_VERSION   = 2
+TRANSCRIPT_CACHE_VERSION   = 3
 TRANSCRIPT_CACHE_KEEP_SECONDS = 86400.0  # 24 h — comfortably beyond ABANDONED_HORIZON_SECONDS = 1800
 TRANSCRIPT_CACHE_SUBKEY_MAX = 4          # max sub-keys retained per transcript per result kind
 DEFAULT_TRANSCRIPT_CACHE   = True

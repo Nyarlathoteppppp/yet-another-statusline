@@ -60,7 +60,7 @@ def test_session_inout_sums_usage_and_subagents(monkeypatch):
     )
     running = RunningSubagents(subagents=[sub_a, sub_b])
 
-    monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p: usage))
+    monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p, **kwargs: usage))
     monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd, now=None, **kwargs: running))
     monkeypatch.setattr(GitInfo,          'from_cwd',       classmethod(lambda cls, cwd: GitInfo()))
     monkeypatch.setattr(OpenSpec,         'from_cwd',       classmethod(lambda cls, cwd: OpenSpec()))
@@ -83,7 +83,7 @@ def test_session_inout_no_subagents(monkeypatch):
     )
     running = RunningSubagents(subagents=[])
 
-    monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p: usage))
+    monkeypatch.setattr(TranscriptUsage, 'from_transcript', classmethod(lambda cls, p, **kwargs: usage))
     monkeypatch.setattr(RunningSubagents, 'from_session',   classmethod(lambda cls, sid, pd, now=None, **kwargs: running))
     monkeypatch.setattr(GitInfo,          'from_cwd',       classmethod(lambda cls, cwd: GitInfo()))
     monkeypatch.setattr(OpenSpec,         'from_cwd',       classmethod(lambda cls, cwd: OpenSpec()))
@@ -837,7 +837,7 @@ def test_session_view_cache_not_written_until_save(tmp_home: Path, frozen_clock:
     st = os.stat(agent_jsonl_path)
 
     # The view should have triggered a parse, so get_parse should return a result
-    parse_result = cache.get_parse(str(agent_jsonl_path), st, resume_after=0.0)
+    parse_result = cache.get_fold(str(agent_jsonl_path), st, 'parse', repr(0.0))
     assert parse_result is not None, (
         "Cache should contain a parse result after field access; "
         "the view did not actually populate the cache"

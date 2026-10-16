@@ -62,9 +62,9 @@ def _silence_dynamic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
                         classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[])))
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
-                        classmethod(lambda cls, path: tasks_mod.TaskList(tasks=[], last_event_ts=0.0)))
+                        classmethod(lambda cls, path, **kwargs: tasks_mod.TaskList(tasks=[], last_event_ts=0.0)))
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
-                        classmethod(lambda cls, path: skills_mod.LoadedSkills(names=[])))
+                        classmethod(lambda cls, path, **kwargs: skills_mod.LoadedSkills(names=[])))
     monkeypatch.setattr(openspec_mod.OpenSpec, 'from_cwd',
                         classmethod(lambda cls, cwd, max_depth=None: openspec_mod.OpenSpec(changes=[])))
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: ''))
@@ -821,7 +821,7 @@ def _both_sections(monkeypatch: pytest.MonkeyPatch, *, long_subject: bool = Fals
     _silence_dynamic(monkeypatch)
     tl = _make_tasklist(long_subject=long_subject)
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
-                        classmethod(lambda cls, path: tl))
+                        classmethod(lambda cls, path, **kwargs: tl))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
                         classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
 
@@ -835,7 +835,7 @@ def _both_sections_narrow_stress(monkeypatch: pytest.MonkeyPatch) -> None:
     _silence_dynamic(monkeypatch)
     tl = _make_tasklist_narrow_stress()
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
-                        classmethod(lambda cls, path: tl))
+                        classmethod(lambda cls, path, **kwargs: tl))
     monkeypatch.setattr(subagents_mod.RunningSubagents, 'from_session',
                         classmethod(lambda cls, sid, pdir, now=None, **kwargs: subagents_mod.RunningSubagents(subagents=[_make_sub()])))
 
@@ -989,7 +989,7 @@ def test_tasks_only_renders_full_width_stacked(monkeypatch: pytest.MonkeyPatch) 
     _silence_dynamic(monkeypatch)
     tl = _make_tasklist(long_subject=True)
     monkeypatch.setattr(tasks_mod.TaskList, 'from_session',
-                        classmethod(lambda cls, path: tl))
+                        classmethod(lambda cls, path, **kwargs: tl))
 
     spec = layout.build_wide(_view(), _tick(), 140, _r)
     assert _divider_content_idx(spec) == [], 'tasks-only must not compose a divider column'
@@ -1202,7 +1202,7 @@ def test_moderate_plugins_row_fills_available_width_not_pre_clipped(monkeypatch:
     from yas.constants import ELLIPSIS
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(skills_mod.LoadedSkills, 'from_transcript',
-                        classmethod(lambda cls, path: skills_mod.LoadedSkills(
+                        classmethod(lambda cls, path, **kwargs: skills_mod.LoadedSkills(
                             names=['a:audiovis-design', 'a:audiovis-fractal', 'a:audiovis-whereis'])))
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'dnb-expe,another-plugin'))
 

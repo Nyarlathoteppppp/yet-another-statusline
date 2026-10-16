@@ -16,9 +16,10 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from yas.constants import _sanitize, last_prompt_path, projects_dir, subagent_is_terminal, subagent_status
+from yas.info.parsecache import fold_file
 
 if TYPE_CHECKING:
     from yas.info.parsecache import TranscriptCache
@@ -440,6 +441,142 @@ def _collect_task_notifications(
     return result
 
 
+_ParseTuple = tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]
+_EMPTY_PARSE: _ParseTuple = (0, 0, 0, 0.0, '', ('', '', {}), 0.0, 0.0)
+
+
+def _parse_init(resume_after: float) -> dict[str, Any]:
+    """Fresh walk state for parse_transcript's fold (JSON-serialisable).
+
+    ``usage`` maps message id -> [billed_in, cache_read_in, output] in
+    first-seen order (JSON objects keep it); a repeat write replaces the value
+    in place, so the LAST-inserted id holds the run totals. ``cur`` is the
+    message-scoped activity accumulator: ``tool`` is ``[name, input]`` or None,
+    ``text`` the first-line snippet of the last text block or None.
+    """
+    return {
+        'resume_after': resume_after,
+        'usage':        {},
+        'first_ts':     0.0,
+        'run_start_ts': 0.0,
+        'end_ts':       0.0,
+        'model':        '',
+        'cur': {'mid': '', 'tool': None, 'text': None, 'has_content': False},
+    }
+
+
+def _parse_fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
+    """Advance parse_transcript's walk state over complete transcript lines."""
+    resume_after = state['resume_after']
+    usage_by_id  = state['usage']
+    cur          = state['cur']
+    for raw in lines:
+        ln = raw.decode('utf-8', errors='ignore')
+        # Keep reading timestamped lines past the first one only while a
+        # resume boundary was supplied and its run_start_ts is not yet found.
+        need_run_start = resume_after > 0.0 and state['run_start_ts'] == 0.0
+        if ('"timestamp"' in ln) and (state['first_ts'] == 0.0 or need_run_start):
+            try:
+                d = json.loads(ln)
+                ts_raw = d.get('timestamp', '')
+                if ts_raw:
+                    parsed = _parse_iso_to_epoch(ts_raw)
+                    if state['first_ts'] == 0.0:
+                        state['first_ts'] = parsed
+                    if need_run_start and parsed > resume_after:
+                        state['run_start_ts'] = parsed
+            except (ValueError, TypeError, AttributeError):
+                pass
+        if '"usage"' not in ln or '"assistant"' not in ln:
+            continue
+        try:
+            d = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        msg = d.get('message') or {}
+        mid = msg.get('id')
+        # Terminal-state check runs on EVERY assistant+usage line, independent
+        # of message-id dedup. Last-write-wins: a later end_turn overwrites an
+        # earlier end_ts, and a later non-terminal line clears it (a warm
+        # agent can be resumed after its turn ends).
+        try:
+            stop    = msg.get('stop_reason')
+            ts_raw  = d.get('timestamp', '')
+            line_ts = _parse_iso_to_epoch(ts_raw) if ts_raw else 0.0
+            if stop == 'end_turn' and line_ts:
+                state['end_ts'] = line_ts
+            elif stop != 'end_turn':
+                state['end_ts'] = 0.0
+        except (ValueError, TypeError, AttributeError):
+            pass
+        if not mid:
+            continue
+        first_sight = mid not in usage_by_id
+        # Last-line-wins per id: streamed usage counters grow across writes.
+        u = msg.get('usage') or {}
+        usage_by_id[mid] = [
+            (u.get('input_tokens', 0) or 0) + (u.get('cache_creation_input_tokens', 0) or 0),
+            u.get('cache_read_input_tokens', 0) or 0,
+            u.get('output_tokens', 0) or 0,
+        ]
+        # Activity is message-scoped: accumulate across streamed writes of the
+        # same id (tool_use > text > thinking), reset when the id changes.
+        if mid != cur['mid']:
+            cur.update(mid=mid, tool=None, text=None, has_content=False)
+        for item in (msg.get('content') or []):
+            if not isinstance(item, dict):
+                continue
+            cur['has_content'] = True
+            kind = item.get('type', '')
+            if kind == 'tool_use':
+                raw_inp = item.get('input') or {}
+                inp = {
+                    k: _sanitize(v) if isinstance(v, str) else v
+                    for k, v in raw_inp.items()
+                } if isinstance(raw_inp, dict) else {}
+                cur['tool'] = [_sanitize(str(item.get('name', '') or '')), inp]
+            elif kind == 'text':
+                snippet = ''
+                for line in str(item.get('text', '') or '').splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        snippet = _sanitize(stripped)
+                        break
+                cur['text'] = snippet
+        if first_sight and not state['model']:
+            state['model'] = msg.get('model') or ''
+    return state
+
+
+def _parse_result(state: dict[str, Any], totals_only: bool) -> _ParseTuple:
+    """Derive the 8-tuple from a walk state."""
+    usage_by_id = state['usage']
+    # Each usage block is the CUMULATIVE prompt for that turn, so the
+    # last-inserted id already carries the totals; never sum across turns.
+    billed_in, cache_read_in, output = (
+        next(reversed(usage_by_id.values())) if usage_by_id else (0, 0, 0)
+    )
+    model         = ''
+    last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
+    if not totals_only:
+        model = state['model']
+        cur   = state['cur']
+        # Prefer the last tool_use (a trailing narration must not mask it),
+        # then the last text block's first non-empty line, then thinking.
+        if cur['tool'] is not None:
+            last_activity = ('tool_use', cur['tool'][0], cur['tool'][1])
+        elif cur['text'] is not None:
+            last_activity = ('text', cur['text'], {})
+        elif cur['has_content']:
+            last_activity = ('thinking', '', {})
+    return (
+        billed_in, cache_read_in, output, state['first_ts'], model,
+        last_activity, state['end_ts'], state['run_start_ts'],
+    )
+
+
 def parse_transcript(
     jsonl: Path,
     resume_after: float = 0.0,
@@ -447,7 +584,7 @@ def parse_transcript(
     cache: TranscriptCache | None = None,
     st: os.stat_result | None = None,
     totals_only: bool = False,
-) -> tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float]:
+) -> _ParseTuple:
     """Parse one agent-*.jsonl transcript into the subagent metric tuple.
 
     Module-level so the workflow cohort reader (info/workflows.py) can call the
@@ -457,326 +594,26 @@ def parse_transcript(
 
     ``resume_after``, when positive, is the caller's resume-boundary timestamp
     (typically the last-seen ``<task-notification>`` before the run being
-    displayed). When given, ``run_start_ts`` in the return is the timestamp of
-    the FIRST transcript line that postdates it — the true start of the
-    current run for a resumed agent — found in the same single streaming pass
-    used for everything else here (never a second whole-file re-read).
-    ``run_start_ts`` is ``0.0`` when ``resume_after`` is ``0.0`` (not asked
-    for) or no later line was found (caller falls back to ``resume_after``
-    itself). Never raises; an unreadable transcript yields zeroes.
+    displayed). ``run_start_ts`` is then the timestamp of the FIRST line that
+    postdates it, or ``0.0`` when ``resume_after`` is ``0.0`` or no later line
+    exists. Never raises; an unreadable transcript yields zeroes.
 
-    When cache is not None and totals_only is False, attempts to load a cached
-    parse result keyed by (path, resume_after). st, if provided, is used as the
-    file stat; otherwise it is re-fetched. After a full parse, stores the result
-    in the cache. totals_only=True results are NEVER cached (they have blanked
-    fields that would poison a later full-fidelity read).
-
-    When totals_only is True, skips model resolution, tag/regex extraction, and
-    last-activity tracking, returning model='' and last_activity=('', '', {}).
-    All other fields (billed_in, cache_read_in, output, first_ts, end_ts,
-    run_start_ts) MUST equal the full-parse value. This mode filters the input
-    file in binary before json.loads to improve performance on very large
-    transcripts, but always decodes the FIRST and LAST complete lines to ensure
-    first_ts, run_start_ts, and end_ts stay exact.
+    The walk is an incremental fold (see parsecache.fold_file): with a cache
+    the walk state is stored per (path, resume_after) and only newly appended
+    complete lines are folded on the next call. The result always equals a
+    full parse of the same file. ``totals_only`` shares the same state and
+    blanks ``model`` and ``last_activity`` in the returned tuple.
     """
-    # Try to load from cache if available and not totals_only.
-    if cache is not None and not totals_only:
-        if st is None:
-            try:
-                st = jsonl.stat()
-            except OSError:
-                st = None
-        if st is not None:
-            cached = cache.get_parse(str(jsonl), st, resume_after)
-            if cached is not None:
-                return cached
-
-    # totals_only mode: skip model/activity tracking, pre-filter usage lines
-    # for performance on large transcripts, but always decode first/last lines
-    # to ensure first_ts, run_start_ts, end_ts stay exact. If resume_after > 0,
-    # must also decode timestamped lines before the first usage line.
-    if totals_only:
-        seen: set[str] = set()
-        usage_by_id: dict[str, tuple[int, int, int]] = {}
-        first_ts     = 0.0
-        run_start_ts = 0.0
-        end_ts       = 0.0
-        model        = ''
-        last_activity: tuple[str, str, dict[str, object]] = ('', '', {})
-
+    if cache is not None and st is None:
         try:
-            with jsonl.open('rb') as fh:
-                content = fh.read()
+            st = jsonl.stat()
         except OSError:
-            result: tuple[int, int, int, float, str, tuple[str, str, dict[str, object]], float, float] = (
-                0, 0, 0, 0.0, '', ('', '', {}), 0.0, 0.0,
-            )
-            # Never cache a totals_only result (it has blanked fields).
-            return result
-
-        # Split by newlines to find first/last complete lines.
-        lines = content.split(b'\n')
-        if not lines:
-            result = (0, 0, 0, 0.0, '', ('', '', {}), 0.0, 0.0)
-            return result
-
-        need_run_start = resume_after > 0.0
-
-        # Always decode the first complete line (might be empty).
-        if lines:
-            first_line = lines[0]
-            if first_line:
-                try:
-                    d = json.loads(first_line.decode('utf-8', errors='ignore'))
-                    ts_raw = d.get('timestamp', '')
-                    if ts_raw:
-                        first_ts = _parse_iso_to_epoch(ts_raw)
-                except (ValueError, TypeError):
-                    pass
-
-        # Process all lines: decode timestamped + usage lines.
-        for i, raw_line in enumerate(lines):
-            if not raw_line:
-                continue
-
-            # Always decode timestamped lines while looking for run_start_ts.
-            if need_run_start and b'"timestamp"' in raw_line:
-                try:
-                    d = json.loads(raw_line.decode('utf-8', errors='ignore'))
-                    ts_raw = d.get('timestamp', '')
-                    if ts_raw:
-                        parsed = _parse_iso_to_epoch(ts_raw)
-                        if parsed > resume_after:
-                            run_start_ts = parsed
-                            need_run_start = False
-                except (ValueError, TypeError):
-                    pass
-
-            # Pre-filter: only decode usage lines.
-            if b'"usage"' not in raw_line or b'"assistant"' not in raw_line:
-                continue
-
-            try:
-                d = json.loads(raw_line.decode('utf-8', errors='ignore'))
-            except (ValueError, TypeError):
-                continue
-
-            msg = d.get('message') or {}
-            mid = msg.get('id')
-
-            # Capture end_ts from end_turn (last-write-wins).
-            try:
-                stop   = msg.get('stop_reason')
-                ts_raw = d.get('timestamp', '')
-                line_ts = _parse_iso_to_epoch(ts_raw) if ts_raw else 0.0
-                if stop == 'end_turn' and line_ts:
-                    end_ts = line_ts
-                elif stop != 'end_turn':
-                    end_ts = 0.0
-            except (ValueError, TypeError, AttributeError):
-                pass
-
-            if not mid:
-                continue
-
-            # Capture usage (last-line-wins).
-            u = msg.get('usage') or {}
-            usage_by_id[mid] = (
-                (u.get('input_tokens', 0) or 0) + (u.get('cache_creation_input_tokens', 0) or 0),
-                u.get('cache_read_input_tokens', 0) or 0,
-                u.get('output_tokens', 0) or 0,
-            )
-
-        # Each usage block already reports the CUMULATIVE prompt size for that
-        # turn (input + cache_creation + cache_read == the whole context sent
-        # on that call). The last turn in transcript order therefore already
-        # carries the full totals; summing across turns would double/N-tuple
-        # count the same growing history once per turn.
-        billed_in, cache_read_in, output = (
-            next(reversed(usage_by_id.values())) if usage_by_id else (0, 0, 0)
-        )
-
-        # Never cache totals_only results (blanked fields would poison full parses).
-        result = (billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts)
-        return result
-
-    # Full parse mode (not totals_only).
-    seen = set()
-    # Usage is keyed by message id with last-line-wins: streaming re-writes
-    # the same id as it appends content blocks, and the usage counters GROW
-    # across those writes — the final one carries the message's real totals.
-    # Accumulating only the first write (behind the dedup) freezes usage at
-    # the first partial snapshot and undercounts output tokens.
-    # The OUTER aggregation (across message ids) is ALSO last-value-wins, not
-    # a sum: each usage block already reports the cumulative prompt for that
-    # turn, so the last id inserted (transcript order) already holds the
-    # run's real totals.
-    usage_by_id = {}
-    first_ts     = 0.0
-    run_start_ts = 0.0
-    end_ts       = 0.0
-    model        = ''
-    last_activity = ('', '', {})
-    # Activity is scoped to the FINAL message: block memory accumulates across
-    # the streamed writes of one message id and resets when the id changes, so
-    # a message's later tool_use/text writes are observed — its first streamed
-    # write is usually the thinking block, and computing activity only behind
-    # the dedup would leave every streamed agent stuck on "(thinking)".
-    cur_mid  = ''
-    cur_tool: dict[str, object] | None = None
-    cur_text: dict[str, object] | None = None
-    cur_has_content = False
-    try:
-        with jsonl.open('r', errors='ignore') as fh:
-            for ln in fh:
-                # Timestamp scan: keep reading timestamped lines past the
-                # first one only while resume_after was supplied and its
-                # run_start_ts boundary hasn't been found yet, so a
-                # never-resumed caller (resume_after == 0.0) pays no extra
-                # cost beyond the original single-timestamp check.
-                need_run_start = resume_after > 0.0 and run_start_ts == 0.0
-                if ('"timestamp"' in ln) and (first_ts == 0.0 or need_run_start):
-                    try:
-                        d = json.loads(ln)
-                        ts_raw = d.get('timestamp', '')
-                        if ts_raw:
-                            parsed = _parse_iso_to_epoch(ts_raw)
-                            if first_ts == 0.0:
-                                first_ts = parsed
-                            if need_run_start and parsed > resume_after:
-                                run_start_ts = parsed
-                    except (ValueError, TypeError):
-                        pass
-                if '"usage"' not in ln or '"assistant"' not in ln:
-                    continue
-                try:
-                    d = json.loads(ln)
-                except (ValueError, TypeError):
-                    continue
-                msg = d.get('message') or {}
-                mid = msg.get('id')
-                # Terminal-state check runs on EVERY assistant+usage line,
-                # independent of message-id dedup. Streaming writes the same
-                # message.id several times (early partials with
-                # stop_reason: null, a final write with end_turn); the dedup
-                # below must not let an already-seen id suppress this capture.
-                # Last-write-wins: a later end_turn overwrites an earlier
-                # end_ts, and a later NON-terminal line clears it — a subagent
-                # can be resumed after its turn ends (SendMessage to a warm
-                # agent), and the stale end_ts would render a working agent as
-                # Done. This end_turn-derived end_ts is a real API field, not
-                # prose pattern-matching, and is kept for callers that still
-                # consult parse_transcript directly (e.g. info/workflows.py);
-                # RunningSubagent.end_ts is always overwritten from the
-                # authoritative <task-notification> map instead — see
-                # _collect_task_notifications above.
-                try:
-                    stop   = msg.get('stop_reason')
-                    ts_raw = d.get('timestamp', '')
-                    line_ts = _parse_iso_to_epoch(ts_raw) if ts_raw else 0.0
-                    if stop == 'end_turn' and line_ts:
-                        end_ts = line_ts
-                    elif stop != 'end_turn':
-                        end_ts = 0.0
-                except (ValueError, TypeError, AttributeError):
-                    pass
-                if not mid:
-                    continue
-                # Update usage_by_id with last-line-wins: streamed usage counters
-                # grow across an id's writes; the final write carries real totals.
-                u = msg.get('usage') or {}
-                usage_by_id[mid] = (
-                    (u.get('input_tokens', 0) or 0) + (u.get('cache_creation_input_tokens', 0) or 0),
-                    u.get('cache_read_input_tokens', 0) or 0,
-                    u.get('output_tokens', 0) or 0,
-                )
-                # Activity is message-scoped: accumulate across streamed writes of the
-                # same message id so later tool_use/text blocks (after the thinking
-                # block) are observed with the usual tool_use > text > thinking priority.
-                if mid != cur_mid:
-                    cur_mid  = mid
-                    cur_tool = None
-                    cur_text = None
-                    cur_has_content = False
-                for item in (msg.get('content') or []):
-                    if not isinstance(item, dict):
-                        continue
-                    cur_has_content = True
-                    kind = item.get('type', '')
-                    if kind == 'tool_use':
-                        cur_tool = item
-                    elif kind == 'text':
-                        cur_text = item
-                if mid in seen:
-                    continue
-                seen.add(mid)
-                if not model:
-                    m = msg.get('model') or ''
-                    if m:
-                        model = m
-    except OSError:
-        pass
-    # Same last-turn-wins fix as the totals_only path above: each usage block
-    # is already the cumulative context for that turn, so the last turn's
-    # values are the totals, not the sum across turns.
-    billed_in, cache_read_in, output = (
-        next(reversed(usage_by_id.values())) if usage_by_id else (0, 0, 0)
+            return _EMPTY_PARSE
+    state = fold_file(
+        cache, str(jsonl), st, 'parse', repr(float(resume_after)),
+        lambda: _parse_init(resume_after), _parse_fold,
     )
-    # Activity reflects the final message. Prefer its last tool_use block —
-    # a trailing text narration must not mask an actual tool call (Claude
-    # often emits [text, tool_use, text]) — then the first non-empty line of
-    # its last text block, then thinking. The priority applies across the
-    # id's streamed writes exactly as it does within a whole-message array.
-    if cur_tool is not None:
-        raw_inp = cur_tool.get('input') or {}
-        inp = {
-            k: _sanitize(v) if isinstance(v, str) else v
-            for k, v in raw_inp.items()
-        } if isinstance(raw_inp, dict) else {}
-        last_activity = ('tool_use', _sanitize(str(cur_tool.get('name', '') or '')), inp)
-    elif cur_text is not None:
-        snippet = ''
-        for line in str(cur_text.get('text', '') or '').splitlines():
-            stripped = line.strip()
-            if stripped:
-                snippet = _sanitize(stripped)
-                break
-        last_activity = ('text', snippet, {})
-    elif cur_has_content:
-        last_activity = ('thinking', '', {})
-    # Terminal-text Done fallback. Some sidechain (sub-agent) transcripts
-    # never emit stop_reason: "end_turn" — every assistant line is either
-    # "tool_use" or null, including the final result message. A finished
-    # agent's LAST assistant line is then terminal text: a text block with no
-    # tool_use awaiting a result. A still-running agent's last assistant line
-    # is a tool_use (or it is mid-streaming), so this cannot fire once work
-    # is genuinely done. Only the last line is considered, so interstitial
-    # null-stop text mid-stream never triggers it.
-    # NOTE: this used to also infer "done" from prose (a terminal-looking text
-    # block with no trailing tool_use) and from a StructuredOutput tool_use as
-    # the final action. Both were deleted: prose/heuristic completion caused a
-    # confirmed false positive (an agent narrating "still waiting for the
-    # actual completion notification..." was marked done while still alive).
-    # The authoritative signal is now the <task-notification> record scanned
-    # in RunningSubagents.from_session — see _collect_task_notifications
-    # below. This function's end_ts remains end_turn-only (a real API field,
-    # not prose pattern-matching) for callers that still consult it (e.g.
-    # info/workflows.py), but RunningSubagent.end_ts is overwritten from the
-    # notification map, never from this heuristic.
-
-    result = (billed_in, cache_read_in, output, first_ts, model, last_activity, end_ts, run_start_ts)
-
-    # Store in cache if available and not totals_only.
-    if cache is not None:
-        if st is None:
-            try:
-                st = jsonl.stat()
-            except OSError:
-                st = None
-        if st is not None:
-            cache.put_parse(str(jsonl), st, resume_after, result)
-
-    return result
+    return _parse_result(state, totals_only)
 
 
 def _build_tree_index(

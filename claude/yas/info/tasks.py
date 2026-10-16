@@ -1,10 +1,16 @@
 from __future__ import annotations
 import json
+import os
+import stat
 import time
 from datetime import datetime
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from yas.constants import _sanitize
+from yas.info.parsecache import fold_file
+
+if TYPE_CHECKING:
+    from yas.info.parsecache import TranscriptCache
 
 
 def _parse_iso_to_epoch(ts: str) -> float:
@@ -14,6 +20,66 @@ def _parse_iso_to_epoch(ts: str) -> float:
         return datetime.fromisoformat(ts).timestamp()
     except (ValueError, TypeError):
         return 0.0
+
+
+def _tasks_init() -> dict[str, Any]:
+    # by: str(task id) -> [subject, active_form, status, started_at, completed_at]
+    return {'by': {}, 'next': 1, 'ts': 0.0}
+
+
+def _tasks_fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
+    by = state['by']
+    for raw in lines:
+        if b'"TaskCreate"' not in raw and b'"TaskUpdate"' not in raw:
+            continue
+        try:
+            d = json.loads(raw.decode('utf-8', 'ignore'))
+        except ValueError:
+            continue
+        ts = _parse_iso_to_epoch(d.get('timestamp', ''))
+        content = d.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict) or c.get('type') != 'tool_use':
+                continue
+            name = c.get('name', '')
+            inp  = c.get('input') or {}
+            if name == 'TaskCreate':
+                # D2: a TaskCreate folded while all known tasks are completed
+                # (and at least one exists) opens a new generation -- discard
+                # prior tasks, restart ids at 1.
+                if by and all(t[2] == 'completed' for t in by.values()):
+                    by.clear()
+                    state['next'] = 1
+                subj = _sanitize(inp.get('subject', '') or '')
+                af   = _sanitize(inp.get('activeForm', '') or '') or subj
+                by[str(state['next'])] = [subj, af, 'pending', None, None]
+                state['next'] += 1
+                if ts > state['ts']: state['ts'] = ts
+            elif name == 'TaskUpdate':
+                try:
+                    tid = int(inp.get('taskId', '0'))
+                except (TypeError, ValueError):
+                    continue
+                t = by.get(str(tid))
+                if not t:
+                    continue
+                new_status = inp.get('status')
+                if new_status in ('pending', 'in_progress', 'completed'):
+                    # D1: capture per-task timestamps on transitions.
+                    if new_status == 'in_progress':
+                        t[3] = ts
+                        t[4] = None
+                    elif new_status == 'completed':
+                        t[4] = ts
+                    t[2] = new_status
+                if 'activeForm' in inp and inp['activeForm']:
+                    t[1] = _sanitize(inp['activeForm'])
+                if 'subject' in inp and inp['subject']:
+                    t[0] = _sanitize(inp['subject'])
+                if ts > state['ts']: state['ts'] = ts
+    return state
 
 
 class Task:
@@ -69,71 +135,26 @@ class TaskList:
         return f'TaskList(tasks={self.tasks!r}, last_event_ts={self.last_event_ts})'
 
     @classmethod
-    def from_session(cls, transcript_path: str) -> TaskList:
+    def from_session(
+        cls,
+        transcript_path: str,
+        *,
+        cache: 'TranscriptCache | None' = None,
+    ) -> TaskList:
         if not transcript_path:
             return cls()
-        path = Path(transcript_path)
-        if not path.is_file():
-            return cls()
-        by_id: dict[int, Task] = {}
-        next_id = 1
-        last_ts = 0.0
         try:
-            with path.open('r', errors='ignore') as fh:
-                for ln in fh:
-                    if '"TaskCreate"' not in ln and '"TaskUpdate"' not in ln:
-                        continue
-                    try:
-                        d = json.loads(ln)
-                    except ValueError:
-                        continue
-                    ts = _parse_iso_to_epoch(d.get('timestamp', ''))
-                    content = d.get('message', {}).get('content', [])
-                    if not isinstance(content, list):
-                        continue
-                    for c in content:
-                        if not isinstance(c, dict) or c.get('type') != 'tool_use':
-                            continue
-                        name = c.get('name', '')
-                        inp  = c.get('input') or {}
-                        if name == 'TaskCreate':
-                            # D2: a TaskCreate folded while all known tasks are
-                            # completed (and at least one exists) opens a new
-                            # generation — discard prior tasks, restart ids at 1.
-                            if by_id and all(t.status == 'completed' for t in by_id.values()):
-                                by_id = {}
-                                next_id = 1
-                            subj = _sanitize(inp.get('subject', '') or '')
-                            af   = _sanitize(inp.get('activeForm', '') or '') or subj
-                            by_id[next_id] = Task(id=next_id, subject=subj, active_form=af, status='pending')
-                            next_id += 1
-                            if ts > last_ts: last_ts = ts
-                        elif name == 'TaskUpdate':
-                            try:
-                                tid = int(inp.get('taskId', '0'))
-                            except (TypeError, ValueError):
-                                continue
-                            t = by_id.get(tid)
-                            if not t:
-                                continue
-                            new_status = inp.get('status')
-                            if new_status in ('pending', 'in_progress', 'completed'):
-                                # D1: capture per-task timestamps on transitions.
-                                if new_status == 'in_progress':
-                                    t.started_at = ts
-                                    t.completed_at = None
-                                elif new_status == 'completed':
-                                    t.completed_at = ts
-                                t.status = new_status
-                            if 'activeForm' in inp and inp['activeForm']:
-                                t.active_form = _sanitize(inp['activeForm'])
-                            if 'subject' in inp and inp['subject']:
-                                t.subject = _sanitize(inp['subject'])
-                            if ts > last_ts: last_ts = ts
+            st = os.stat(transcript_path)
         except OSError:
             return cls()
-        tasks = [by_id[k] for k in sorted(by_id.keys())]
-        return cls(tasks=tasks, last_event_ts=last_ts)
+        if not stat.S_ISREG(st.st_mode):
+            return cls()
+        state = fold_file(cache, transcript_path, st, 'tasks', '', _tasks_init, _tasks_fold)
+        tasks = [
+            Task(id=int(k), subject=v[0], active_form=v[1], status=v[2], started_at=v[3], completed_at=v[4])
+            for k, v in sorted(state['by'].items(), key=lambda kv: int(kv[0]))
+        ]
+        return cls(tasks=tasks, last_event_ts=state['ts'])
 
     @property
     def total(self) -> int:
