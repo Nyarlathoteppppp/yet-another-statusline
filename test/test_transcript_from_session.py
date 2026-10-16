@@ -150,7 +150,7 @@ def test_from_session_uses_cache_to_avoid_reparsing(tmp_path: Path) -> None:
 
     cache = TranscriptCache('test-session')
     first = transcript.TranscriptUsage.from_session(str(sess), cache=cache)
-    assert cache.get_usage(str(sub_path), sub_path.stat()) is not None
+    assert cache.get_fold(str(sub_path), sub_path.stat(), 'usage', '') is not None
 
     # Corrupt the on-disk file without touching mtime/size in a way pytest can
     # detect trivially -- instead, just assert the cached path returns the

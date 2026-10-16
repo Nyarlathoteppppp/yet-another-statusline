@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 
 if TYPE_CHECKING:
     from yas.info.subagents import _Notification
@@ -25,6 +25,9 @@ from yas.constants import (
 )
 
 
+_S = TypeVar('_S')
+
+
 def cache_path(session_id: str) -> Path:
     """Return the cache file path for a session.
 
@@ -35,6 +38,76 @@ def cache_path(session_id: str) -> Path:
     old top-level yas-cache/ directory.
     """
     return transcript_cache_path(session_id)
+
+
+FOLD_CHECK_BYTES = 64
+
+
+def _check_hex(path: str, offset: int) -> str | None:
+    """Return the hex of the FOLD_CHECK_BYTES bytes just before `offset`, or None on read error."""
+    start = max(0, offset - FOLD_CHECK_BYTES)
+    try:
+        with open(path, 'rb') as f:
+            f.seek(start)
+            return f.read(offset - start).hex()
+    except OSError:
+        return None
+
+
+def read_complete_lines(path: str, offset: int) -> tuple[bytes, int, str]:
+    """Read from `offset` up to and including the last newline byte.
+
+    Returns (chunk, new_offset, check). A half-written trailing line is not
+    consumed. `check` is the hex of the FOLD_CHECK_BYTES bytes ending at
+    new_offset (the prefix identity for the next resume). Raises OSError.
+    """
+    start = max(0, offset - FOLD_CHECK_BYTES)
+    with open(path, 'rb') as f:
+        f.seek(start)
+        head = f.read(offset - start)
+        data = f.read()
+
+    cut = data.rfind(b'\n') + 1
+    chunk = data[:cut]
+    tail = (head + chunk)[-FOLD_CHECK_BYTES:]
+    return chunk, offset + cut, tail.hex()
+
+
+def fold_file(
+    cache: 'TranscriptCache | None',
+    path: str,
+    st: os.stat_result | None,
+    key: str,
+    subkey: str,
+    init: Callable[[], _S],
+    fold: Callable[[_S, list[bytes]], _S],
+) -> _S:
+    """Resume or restart an incremental fold over the complete lines of `path`.
+
+    init() returns a fresh JSON-serialisable state; fold(state, lines) returns
+    the new state for the given new complete lines (bytes, no newline). With
+    cache=None this is a full parse with no store. An unreadable file yields
+    init() and stores nothing.
+    """
+    state = init()
+    offset = 0
+    if cache is not None and st is not None:
+        hit = cache.get_fold(path, st, key, subkey)
+        if hit is not None:
+            state, offset = hit
+
+    try:
+        chunk, new_offset, check = read_complete_lines(path, offset)
+    except OSError:
+        return init()
+
+    if not chunk:
+        return state
+
+    state = fold(state, chunk.split(b'\n')[:-1])
+    if cache is not None and st is not None:
+        cache.put_fold(path, st, key, subkey, state, new_offset, check)
+    return state
 
 
 class TranscriptCache:
@@ -521,6 +594,68 @@ class TranscriptCache:
 
         entry['seen'] = time.time()
         self._dirty = True
+
+    def get_fold(
+        self, path: str, st: os.stat_result, key: str, subkey: str = ''
+    ) -> tuple[Any, int] | None:
+        """Return (state, offset) for an incremental fold, or None to re-parse from 0.
+
+        Valid only while dev/ino match `st`, st_size >= offset, and the stored
+        prefix-check bytes still match the file. Independent of mtime.
+        """
+        entry = self._entries.get(path)
+        folds = entry.get('fold') if entry is not None else None
+        subs = folds.get(key) if isinstance(folds, dict) else None
+        rec = subs.get(subkey) if isinstance(subs, dict) else None
+        if not isinstance(rec, dict):
+            return None
+
+        offset = rec.get('off')
+        if (
+            rec.get('dev') != st.st_dev
+            or rec.get('ino') != st.st_ino
+            or not isinstance(offset, int)
+            or st.st_size < offset
+            or 'state' not in rec
+        ):
+            return None
+
+        if _check_hex(path, offset) != rec.get('chk'):
+            return None
+        return rec['state'], offset
+
+    def put_fold(
+        self,
+        path: str,
+        st: os.stat_result,
+        key: str,
+        subkey: str,
+        state: Any,
+        offset: int,
+        check: str,
+    ) -> None:
+        """Store fold state at `offset`.
+
+        Layout: entry['fold'][key][subkey] = {dev, ino, off, chk, state}.
+        Subkeys are trimmed to TRANSCRIPT_CACHE_SUBKEY_MAX.
+        """
+        entry = self._entries.setdefault(path, {})
+        entry['seen'] = time.time()
+        self._dirty = True
+
+        folds = entry.get('fold')
+        if not isinstance(folds, dict):
+            folds = entry['fold'] = {}
+        subs = folds.get(key)
+        if not isinstance(subs, dict):
+            subs = folds[key] = {}
+
+        subs[subkey] = {
+            'dev': st.st_dev, 'ino': st.st_ino, 'off': offset, 'chk': check, 'state': state,
+        }
+        if len(subs) > TRANSCRIPT_CACHE_SUBKEY_MAX:
+            for old_key in sorted(subs)[:-TRANSCRIPT_CACHE_SUBKEY_MAX]:
+                del subs[old_key]
 
     def mark_terminal(self, path: str) -> None:
         """Mark a transcript as terminal (will not grow further).

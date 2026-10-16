@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+import os
 import re
-from pathlib import Path
+import stat
+from typing import TYPE_CHECKING
 
 from yas.constants import _sanitize
+from yas.info.parsecache import fold_file
+
+if TYPE_CHECKING:
+    from yas.info.parsecache import TranscriptCache
+
+_SKILL_PAT      = re.compile(r'"name"\s*:\s*"Skill"[^}]*?"skill"\s*:\s*"([^"]+)"')
+_READ_PAT       = re.compile(r'"name"\s*:\s*"Read"[^}]*?"file_path"\s*:\s*"([^"]+)"')
+_SKILL_PATH_PAT = re.compile(r'/skills/([^/"]+)/SKILL\.md$')
+
+
+def _skills_fold(names: list[str], lines: list[bytes]) -> list[str]:
+    """Append skill names in first-occurrence order (pure append-only union)."""
+    seen = set(names)
+    for raw in lines:
+        has_skill = b'"Skill"' in raw
+        has_read  = b'"Read"' in raw and b'SKILL.md' in raw
+        if not (has_skill or has_read):
+            continue
+        ln = raw.decode('utf-8', 'ignore')
+        found: list[str] = []
+        if has_skill:
+            found.extend(m.group(1) for m in _SKILL_PAT.finditer(ln))
+        if has_read:
+            for m in _READ_PAT.finditer(ln):
+                sm = _SKILL_PATH_PAT.search(m.group(1))
+                if sm:
+                    found.append(sm.group(1))
+        for raw_name in found:
+            name = _sanitize(raw_name)
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
 
 
 class LoadedSkills:
@@ -25,31 +60,19 @@ class LoadedSkills:
         return f'LoadedSkills(names={self.names!r})'
 
     @classmethod
-    def from_transcript(cls, transcript_path: str) -> LoadedSkills:
+    def from_transcript(
+        cls,
+        transcript_path: str,
+        *,
+        cache: 'TranscriptCache | None' = None,
+    ) -> LoadedSkills:
         if not transcript_path:
             return cls()
-        p = Path(transcript_path)
-        if not p.is_file():
-            return cls()
-        skill_pat = re.compile(r'"name"\s*:\s*"Skill"[^}]*?"skill"\s*:\s*"([^"]+)"')
-        read_pat = re.compile(r'"name"\s*:\s*"Read"[^}]*?"file_path"\s*:\s*"([^"]+)"')
-        skill_path_pat = re.compile(r'/skills/([^/"]+)/SKILL\.md$')
-        seen: dict[str, None] = {}
         try:
-            with p.open('r', errors='ignore') as fh:
-                for ln in fh:
-                    if '"Skill"' in ln:
-                        for m in skill_pat.finditer(ln):
-                            name = _sanitize(m.group(1))
-                            if name not in seen:
-                                seen[name] = None
-                    if '"Read"' in ln and 'SKILL.md' in ln:
-                        for m in read_pat.finditer(ln):
-                            sm = skill_path_pat.search(m.group(1))
-                            if sm:
-                                name = _sanitize(sm.group(1))
-                                if name not in seen:
-                                    seen[name] = None
+            st = os.stat(transcript_path)
         except OSError:
             return cls()
-        return cls(names=list(seen.keys()))
+        if not stat.S_ISREG(st.st_mode):
+            return cls()
+        names = fold_file(cache, transcript_path, st, 'skills', '', list, _skills_fold)
+        return cls(names=list(names))

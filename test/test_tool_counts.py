@@ -251,8 +251,13 @@ def test_count_transcript_without_cache_uses_no_cache() -> None:
     pass
 
 
-def test_count_transcript_cached_hit_does_not_reopen_file(tmp_path: Path) -> None:
-    """Verify that a cache hit doesn't reopen the file."""
+def test_count_transcript_cached_hit_parses_no_lines(tmp_path: Path) -> None:
+    """An unchanged file resumes from the stored offset and decodes no JSON.
+
+    The fold re-opens the file to verify the stored prefix bytes, so the old
+    "never opens the file" assertion no longer holds; what matters is that no
+    line is re-parsed.
+    """
     import os
     from unittest.mock import patch
 
@@ -263,20 +268,11 @@ def test_count_transcript_cached_hit_does_not_reopen_file(tmp_path: Path) -> Non
         _line('m2', ['Read', 'Read']),
     ])
 
-    # Create a cache and populate it with a first call.
     cache = TranscriptCache('test-session')
     st = os.stat(path)
     result1 = count_transcript(path, None, skip_sidechain=True, cache=cache, st=st)
     assert result1.counts == {'Bash': 1, 'Read': 2}
 
-    # On the second call, monkeypatch `open` to raise if it's called.
-    # A cache hit should not open the file.
-    def raising_open(*args, **kwargs):
-        raise AssertionError(f"open() called unexpectedly: {args}")
-
-    with patch('builtins.open', side_effect=raising_open):
-        # This should hit the cache and not call open.
+    with patch('json.loads', side_effect=AssertionError('line re-parsed')):
         result2 = count_transcript(path, None, skip_sidechain=True, cache=cache, st=st)
-        assert result2.counts == {'Bash': 1, 'Read': 2}
-        assert result2.lines_read == result1.lines_read
-        assert result2.lines_changed == result1.lines_changed
+    assert result2 == result1

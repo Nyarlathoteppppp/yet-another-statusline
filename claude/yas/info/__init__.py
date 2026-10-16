@@ -94,7 +94,7 @@ class SessionView:
 
     @cached_property
     def skills(self) -> LoadedSkills:
-        return LoadedSkills.from_transcript(self.session.transcript_path)
+        return LoadedSkills.from_transcript(self.session.transcript_path, cache=self.parse_cache)
 
     @cached_property
     def subagents(self) -> RunningSubagents:
@@ -113,11 +113,11 @@ class SessionView:
 
     @cached_property
     def tasks(self) -> TaskList:
-        return TaskList.from_session(self.session.transcript_path)
+        return TaskList.from_session(self.session.transcript_path, cache=self.parse_cache)
 
     @cached_property
     def transcript_usage(self) -> TranscriptUsage:
-        return TranscriptUsage.from_transcript(self.session.transcript_path)
+        return TranscriptUsage.from_transcript(self.session.transcript_path, cache=self.parse_cache)
 
     @cached_property
     def rate_limit_usage(self) -> TranscriptUsage:
