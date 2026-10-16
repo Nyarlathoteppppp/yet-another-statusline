@@ -90,7 +90,7 @@ class SessionView:
 
     @cached_property
     def git(self) -> GitInfo:
-        return GitInfo.from_cwd(self.session.cwd)
+        return GitInfo.from_cwd(self.session.cwd, status=self.cfg.show_git_status)
 
     @cached_property
     def skills(self) -> LoadedSkills:

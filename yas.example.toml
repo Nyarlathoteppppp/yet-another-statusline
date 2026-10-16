@@ -28,6 +28,9 @@
 # show_render_time = false  # bool; annotate the bottom-right border with the previous
 #                           #   run's wall-clock render time (e.g. …47.2ms──╯). Blank on
 #                           #   a session's first render. env: YAS_SHOW_RENDER_TIME
+# show_git_status = true   # bool; show modified/untracked/deleted/renamed counts beside the
+#                           #   branch. false skips `git status` entirely. Results are cached
+#                           #   5 s per repo, shared across sessions. env: YAS_SHOW_GIT_STATUS
 # show_tool_uses = false    # bool; wide layout only — show the per-tool tool_use
 #                           #   counts row below the tokens/cost rows. env: YAS_SHOW_TOOL_USES
 # show_tokens_over_time = false  # bool; wide layout only — add a full-width "tokens over

@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# git exports GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, ... to hooks. Left set, they
+# redirect any `git -C <tmp>` call made by the tests into this repo. Clear them all.
+for var in $(compgen -e | grep '^GIT_' || true); do
+    unset "$var"
+done
+
 TEST_STATUS=0
 
 printf '\n\033[1;93m> pytest\033[0m\n'

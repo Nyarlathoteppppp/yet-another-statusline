@@ -1,7 +1,12 @@
 from __future__ import annotations
+import hashlib
+import json
+import os
+import tempfile
+import time
 from pathlib import Path
 
-from yas.constants import _sanitize
+from yas.constants import GIT_STATUS_CACHE_TTL, _sanitize, runtime_dir
 
 
 class GitInfo:
@@ -36,12 +41,12 @@ class GitInfo:
                 f'untracked={self.untracked}, deleted={self.deleted}, renamed={self.renamed})')
 
     @classmethod
-    def from_cwd(cls, cwd: str) -> GitInfo:
+    def from_cwd(cls, cwd: str, status: bool = True) -> GitInfo:
         repo, gitdir   = cls._find_repo(cwd)
         branch, commit = cls._read_head(gitdir)
         modified = untracked = deleted = renamed = 0
-        if branch:
-            modified, untracked, deleted, renamed = cls._dirty(repo)
+        if branch and status:
+            modified, untracked, deleted, renamed = cls._cached_dirty(repo, gitdir)
         return cls(
             branch    = branch,
             commit    = commit,
@@ -103,6 +108,65 @@ class GitInfo:
         return branch, commit
 
     @staticmethod
+    def _real_gitdir(gitdir: str) -> Path:
+        'Resolve a `.git` file (worktree `gitdir:` pointer) to the real git dir.'
+        path = Path(gitdir)
+        if path.is_dir():
+            return path
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            return path
+        if not text.startswith('gitdir:'):
+            return path
+        target = Path(text[len('gitdir:'):].strip())
+        return target if target.is_absolute() else path.parent / target
+
+    @classmethod
+    def _signals(cls, gitdir: str) -> list[object]:
+        'Cheap invalidation signals: index mtime, HEAD text, HEAD ref file mtime.'
+        real = cls._real_gitdir(gitdir)
+        index_mtime = _mtime_ns(real / 'index')
+        try:
+            head = (real / 'HEAD').read_text().strip()
+        except OSError:
+            head = ''
+        ref_mtime = 0
+        if head.startswith('ref:'):
+            ref_mtime = _mtime_ns(real / head[4:].strip())
+        return [index_mtime, head, ref_mtime]
+
+    @classmethod
+    def _cached_dirty(cls, repo: str, gitdir: str) -> tuple[int, int, int, int]:
+        path    = runtime_dir() / f'git-status.{hashlib.sha1(repo.encode()).hexdigest()[:16]}.json'
+        signals = cls._signals(gitdir)
+        now     = time.time()
+        try:
+            data   = json.loads(path.read_text())
+            counts = data['counts']
+            if now - data['ts'] <= GIT_STATUS_CACHE_TTL and data['signals'] == signals:
+                modified, untracked, deleted, renamed = (int(n) for n in counts)
+                return modified, untracked, deleted, renamed
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        result = cls._dirty(repo)
+        cls._store(path, {'ts': now, 'signals': signals, 'counts': list(result)})
+        return result
+
+    @staticmethod
+    def _store(path: Path, data: dict[str, object]) -> None:
+        tmp = ''
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.git-status.')
+            with os.fdopen(fd, 'w') as fh:
+                json.dump(data, fh)
+            os.replace(tmp, path)
+        except OSError:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
+
+    @staticmethod
     def _dirty(repo: str) -> tuple[int, int, int, int]:
         modified = untracked = deleted = renamed = 0
         if not repo:
@@ -140,3 +204,10 @@ class GitInfo:
                 modified += 1
             i += 1
         return modified, untracked, deleted, renamed
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0

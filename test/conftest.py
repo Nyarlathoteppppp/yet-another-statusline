@@ -15,6 +15,13 @@ import yas.render.gradient as _sl_gradient
 _SRC = Path(__file__).resolve().parent.parent / 'claude' / 'statusline_command.py'
 
 
+@pytest.fixture(autouse=True)
+def _clean_git_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    'Drop GIT_* vars that git exports to hooks (GIT_DIR, GIT_INDEX_FILE, ...) so tests never touch the real repo.'
+    for key in [k for k in os.environ if k.startswith('GIT_')]:
+        monkeypatch.delenv(key)
+
+
 def _hooks_active() -> bool:
     'True if core.hooksPath points at the committed hooks (or git is unavailable — then stay quiet).'
     try:

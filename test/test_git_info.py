@@ -8,7 +8,6 @@ import pytest
 import yas.info.git as git
 
 
-
 def _make_git_dir(base: Path, branch: str = 'main', commit: str = 'abcdef1234567890') -> Path:
     """Create a minimal .git directory structure in base."""
     gitdir = base / '.git'

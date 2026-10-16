@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Keep in sync with pyproject.toml's [project] version — pyproject isn't
 # shipped with the runtime copy under ~/.claude, so the value lives here too.
-VERSION    = '0.9.8'
+VERSION    = '0.9.9'
 # Bumped by any future on-disk relayout under yas/; stamped into
 # state/version.json by yas.migrate so a future migration can detect and
 # convert an older layout.
@@ -124,6 +124,9 @@ DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'
 DEFAULT_SHOW_DAY_STATS = True
 DEFAULT_SHOW_TOOL_USES = False
+DEFAULT_SHOW_GIT_STATUS = True
+# Seconds a cached `git status` result is reused (shared across sessions).
+GIT_STATUS_CACHE_TTL = 5.0
 DEFAULT_SHOW_TOKENS_OVER_TIME = False
 DEFAULT_JUSTIFY        = False
 DEFAULT_LABELS         = False
