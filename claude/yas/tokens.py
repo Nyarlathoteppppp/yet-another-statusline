@@ -19,6 +19,7 @@ from yas.constants import (
     DEFAULT_RATE_LIMIT_WEIGHT_INPUT, DEFAULT_RATE_LIMIT_WEIGHT_CACHE_CREATION,
     DEFAULT_RATE_LIMIT_WEIGHT_CACHE_READ, DEFAULT_RATE_LIMIT_WEIGHT_OUTPUT,
 )
+from yas.filelock import atomic_write_text, file_lock
 from yas.session import Model
 
 if TYPE_CHECKING:
@@ -178,8 +179,12 @@ class TokenRate:
         log = token_rate_log()
         now = time.time()
         rows: list[tuple[float, str, int, int]] = []
-        if log.exists():
-            for ln in log.read_text().splitlines():
+        with file_lock(log):
+            try:
+                lines = log.read_text().splitlines() if log.exists() else []
+            except OSError:
+                lines = []
+            for ln in lines:
                 parts = ln.split()
                 if len(parts) < 4:
                     continue
@@ -192,12 +197,11 @@ class TokenRate:
                 if now - ts > cls.KEEP:
                     continue
                 rows.append((ts, parts[1], ti, to))
-        rows.append((now, session_id, total_in, total_out))
-        try:
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text('\n'.join(f'{ts:.3f} {sid} {ti} {to}' for ts, sid, ti, to in rows) + '\n')
-        except OSError:
-            pass
+            rows.append((now, session_id, total_in, total_out))
+            try:
+                atomic_write_text(log, '\n'.join(f'{ts:.3f} {sid} {ti} {to}' for ts, sid, ti, to in rows) + '\n')
+            except OSError:
+                pass
         window  = cls.WINDOW if cls.WINDOW is not None else _token_window()
         samples = [(ts, ti, to) for ts, sid, ti, to in rows if sid == session_id and now - ts <= window]
         if len(samples) < 2:
@@ -641,24 +645,24 @@ class RenderTiming:
         log = render_log()
         now = time.time()
         rows: list[str] = []
-        if log.exists():
+        with file_lock(log):
             try:
-                for ln in log.read_text().splitlines():
-                    parts = ln.split()
-                    if len(parts) < 3 or parts[1] == session_id:
-                        continue
-                    try:
-                        ts = float(parts[0])
-                    except ValueError:
-                        continue
-                    if now - ts > cls.KEEP:
-                        continue
-                    rows.append(ln)
+                lines = log.read_text().splitlines() if log.exists() else []
+            except OSError:
+                lines = []
+            for ln in lines:
+                parts = ln.split()
+                if len(parts) < 3 or parts[1] == session_id:
+                    continue
+                try:
+                    ts = float(parts[0])
+                except ValueError:
+                    continue
+                if now - ts > cls.KEEP:
+                    continue
+                rows.append(ln)
+            rows.append(f'{now:.3f} {session_id} {ms:.1f}')
+            try:
+                atomic_write_text(log, '\n'.join(rows) + '\n')
             except OSError:
                 pass
-        rows.append(f'{now:.3f} {session_id} {ms:.1f}')
-        try:
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text('\n'.join(rows) + '\n')
-        except OSError:
-            pass

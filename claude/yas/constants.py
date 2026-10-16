@@ -124,6 +124,9 @@ DEFAULT_TOKEN_WINDOW = 60.0
 DEFAULT_THEME        = 'claude-dark'
 DEFAULT_SHOW_DAY_STATS = True
 DEFAULT_SHOW_TOOL_USES = False
+DEFAULT_SHOW_GIT_STATUS = True
+# Seconds a cached `git status` result is reused (shared across sessions).
+GIT_STATUS_CACHE_TTL = 5.0
 DEFAULT_SHOW_TOKENS_OVER_TIME = False
 DEFAULT_JUSTIFY        = False
 DEFAULT_LABELS         = False

@@ -40,6 +40,7 @@ from yas.constants import (
     DEFAULT_THEME,
     DEFAULT_SHOW_DAY_STATS,
     DEFAULT_SHOW_TOOL_USES,
+    DEFAULT_SHOW_GIT_STATUS,
     DEFAULT_SHOW_TOKENS_OVER_TIME,
     DEFAULT_TRANSCRIPT_CACHE,
     config_path,
@@ -472,7 +473,7 @@ class Config:
         'max_width', 'full_width', 'justify', 'labels', 'soft_limit',
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
         'show_day_stats', 'context_state', 'context_labels', 'context_thresholds',
-        'show_render_time', 'show_tool_uses', 'show_tokens_over_time', 'soft_limit_models',
+        'show_render_time', 'show_git_status', 'show_tool_uses', 'show_tokens_over_time', 'soft_limit_models',
         'openspec_scan_depth', 'show_icons', 'transcript_cache', 'rate_limit_rules',
         'rate_limit_weights', 'errors', 'debug_lines',
     )
@@ -492,6 +493,7 @@ class Config:
     context_labels:     tuple[str, ...]
     context_thresholds: tuple[int, ...]
     show_render_time:   bool
+    show_git_status:    bool
     show_tool_uses:     bool
     show_tokens_over_time: bool
     soft_limit_models:  tuple[tuple[str, int], ...]
@@ -520,6 +522,7 @@ class Config:
         context_labels:     tuple[str, ...] = DEFAULT_CONTEXT_LABELS,
         context_thresholds: tuple[int, ...] = DEFAULT_CONTEXT_THRESHOLDS,
         show_render_time:   bool = False,
+        show_git_status:    bool = DEFAULT_SHOW_GIT_STATUS,
         show_tool_uses:     bool = DEFAULT_SHOW_TOOL_USES,
         show_tokens_over_time: bool = DEFAULT_SHOW_TOKENS_OVER_TIME,
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
@@ -547,6 +550,7 @@ class Config:
         s(self, 'context_labels', context_labels)
         s(self, 'context_thresholds', context_thresholds)
         s(self, 'show_render_time', show_render_time)
+        s(self, 'show_git_status', show_git_status)
         s(self, 'show_tool_uses', show_tool_uses)
         s(self, 'show_tokens_over_time', show_tokens_over_time)
         s(self, 'soft_limit_models', soft_limit_models)
@@ -571,7 +575,7 @@ class Config:
                 f'glyph_mode={self.glyph_mode!r}, single_width={self.single_width}, '
                 f'show_day_stats={self.show_day_stats}, context_state={self.context_state}, '
                 f'context_labels={self.context_labels!r}, context_thresholds={self.context_thresholds!r}, '
-                f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
+                f'show_render_time={self.show_render_time}, show_git_status={self.show_git_status}, show_tool_uses={self.show_tool_uses}, '
                 f'show_tokens_over_time={self.show_tokens_over_time}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
@@ -672,6 +676,10 @@ class Config:
             'show_render_time',
             _env_sources(env, 'YAS_SHOW_RENDER_TIME') + toml_src(layout, 'show_render_time'),
             _parse_bool, False, errors, debug)
+        show_git_status = _resolve(
+            'show_git_status',
+            _env_sources(env, 'YAS_SHOW_GIT_STATUS') + toml_src(layout, 'show_git_status'),
+            _parse_bool, DEFAULT_SHOW_GIT_STATUS, errors, debug)
         show_tool_uses = _resolve(
             'show_tool_uses',
             _env_sources(env, 'YAS_SHOW_TOOL_USES') + toml_src(layout, 'show_tool_uses'),
@@ -734,6 +742,7 @@ class Config:
             context_labels=context_labels,
             context_thresholds=context_thresholds,
             show_render_time=show_render_time,
+            show_git_status=show_git_status,
             show_tool_uses=show_tool_uses,
             show_tokens_over_time=show_tokens_over_time,
             soft_limit_models=tuple(soft_limit_models),

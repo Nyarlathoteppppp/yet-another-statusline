@@ -1015,3 +1015,20 @@ def test_readonly_dir_cache_write_swallowed(tmp_path: Path) -> None:
         assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
     finally:
         os.chmod(tmp_path, 0o700)
+
+
+def test_show_git_status_defaults_on(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.show_git_status is True
+
+
+def test_toml_show_git_status_false(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[layout]\nshow_git_status = false\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.show_git_status is False
+
+
+def test_env_show_git_status_zero_overrides_toml(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[layout]\nshow_git_status = true\n')
+    cfg = config.Config.load(env={'YAS_SHOW_GIT_STATUS': '0'}, config_dir=tmp_path)
+    assert cfg.show_git_status is False
