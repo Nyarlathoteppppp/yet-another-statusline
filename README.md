@@ -25,7 +25,7 @@ are rewritten on upgrade, and it is removed on uninstall.
 Or install manually:
 
 ```bash
-claude plugin marketplace add tmck-code/yet-another-statusline
+claude plugin marketplace add tmck-code/yet-another-statusline#main
 claude plugin install yas@yet-another-statusline
 claude -p "/yas:init"
 ```

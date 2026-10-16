@@ -58,6 +58,11 @@ fi
 
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
+# Marketplace identity. The source pins `#main`: without a ref, `marketplace add`
+# clones the GitHub default branch, which may be a docs branch.
+MARKETPLACE_NAME="yet-another-statusline"
+MARKETPLACE_SOURCE="tmck-code/yet-another-statusline#main"
+
 # Interactivity / TTY gating --------------------
 # Interactive is the default. We force non-interactive when YAS_NO_TTY=1 OR no
 # readable /dev/tty exists (CI safety — the installer must never block on input).
@@ -796,31 +801,49 @@ preflight_wire_only() {
 # under a piped (non-TTY) stdin.
 # If they prompt in practice, use the manual path:
 # ```
-# claude plugin marketplace add tmck-code/yet-another-statusline
+# claude plugin marketplace add tmck-code/yet-another-statusline#main
 # claude plugin install yas@yet-another-statusline
 # /yas:init
 # ```
 
 ensure_marketplace() {
     heading "Marketplace"
-    local present
-    present=$(json_py has-key "$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json" yet-another-statusline 2>/dev/null) || present="false"
+    local present ref
+    present=$(json_py has-key "$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json" "$MARKETPLACE_NAME" 2>/dev/null) || present="false"
 
+    # `marketplace add` without a ref clones the GitHub default branch, and
+    # `marketplace update` refreshes whatever ref is recorded. Pin main so an
+    # entry recorded on another ref (or none) is replaced, not updated in place.
     if [ "$present" = "true" ]; then
-        if [ "$DRY_RUN" = "1" ]; then
-            step "  Would update marketplace: yet-another-statusline"
-        else
-            step "  Updating marketplace…"
-            run_claude_green claude plugin marketplace update yet-another-statusline
+        ref=$(json_py get-key "$CLAUDE_CONFIG_DIR/plugins/known_marketplaces.json" "$MARKETPLACE_NAME.source.ref" 2>/dev/null) || ref=""
+        if [ "$ref" = "main" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                step "  Would update marketplace: $MARKETPLACE_NAME"
+            else
+                step "  Updating marketplace…"
+                run_claude_green claude plugin marketplace update "$MARKETPLACE_NAME"
+            fi
+            return 0
         fi
-        return
+        if [ "$DRY_RUN" = "1" ]; then
+            step "  Would replace marketplace on ref '${ref:-none}' with main"
+        else
+            step "  Replacing marketplace on ref '${ref:-none}' with main…"
+            if ! run_claude_green claude plugin marketplace remove "$MARKETPLACE_NAME"; then
+                fail "! marketplace remove failed — marketplace left unchanged"
+                return 1
+            fi
+        fi
     fi
 
     if [ "$DRY_RUN" = "1" ]; then
-        step "  Would add marketplace: tmck-code/yet-another-statusline"
+        step "  Would add marketplace: $MARKETPLACE_SOURCE"
     else
         step "  Adding marketplace…"
-        run_claude_green claude plugin marketplace add tmck-code/yet-another-statusline
+        if ! run_claude_green claude plugin marketplace add "$MARKETPLACE_SOURCE"; then
+            fail "! marketplace add failed — run: claude plugin marketplace add $MARKETPLACE_SOURCE"
+            return 1
+        fi
     fi
 }
 
@@ -983,8 +1006,8 @@ do_wire() {
 
         if [ -z "$PLUGIN_ROOT" ]; then
             fail "! yas plugin not found — install first:"
-            printf "    claude plugin marketplace add tmck-code/yet-another-statusline\n"
-            printf "    claude plugin install yas@yet-another-statusline\n"
+            printf "    claude plugin marketplace add %s\n" "$MARKETPLACE_SOURCE"
+            printf "    claude plugin install yas@%s\n" "$MARKETPLACE_NAME"
             exit 1
         fi
     fi
@@ -1453,7 +1476,7 @@ main() {
         fi
         resolve_python_version
         preflight_full
-        ensure_marketplace
+        ensure_marketplace || exit 1
         ensure_plugin
         do_wire
         post_install_message

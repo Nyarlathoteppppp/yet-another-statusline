@@ -339,6 +339,16 @@ def _seed_installed_plugins(config_dir: Path, plugin_root: Path) -> None:
     (config_dir / 'plugins' / 'installed_plugins.json').write_text(json.dumps(data))
 
 
+MARKETPLACE_SOURCE = 'tmck-code/yet-another-statusline#main'
+
+
+def _seed_known_marketplace(config_dir: Path, source: dict) -> None:
+    """Write known_marketplaces.json with a yet-another-statusline entry."""
+    (config_dir / 'plugins' / 'known_marketplaces.json').write_text(
+        json.dumps({'yet-another-statusline': {'source': source, 'installLocation': 'x'}})
+    )
+
+
 @requires_full_preflight
 def test_dry_run_would_add_marketplace_when_absent(full_dry_env):
     config_dir, plugin_root, env = full_dry_env
@@ -346,21 +356,39 @@ def test_dry_run_would_add_marketplace_when_absent(full_dry_env):
     # No known_marketplaces.json → absent → "Would add marketplace"
     result = run_install('--full', '--dry-run', env_extra=env)
     assert result.returncode == 0, result.stderr
-    assert 'Would add marketplace' in result.stdout
+    assert f'Would add marketplace: {MARKETPLACE_SOURCE}' in result.stdout
 
 
 @requires_full_preflight
 def test_dry_run_marketplace_already_present(full_dry_env):
     config_dir, plugin_root, env = full_dry_env
     _seed_installed_plugins(config_dir, plugin_root)
-    # ensure_marketplace checks has("yet-another-statusline") at the top level.
-    (config_dir / 'plugins' / 'known_marketplaces.json').write_text(
-        json.dumps({'yet-another-statusline': {'url': 'x'}})
+    _seed_known_marketplace(
+        config_dir, {'source': 'github', 'repo': 'tmck-code/yet-another-statusline', 'ref': 'main'}
     )
     result = run_install('--full', '--dry-run', env_extra=env)
     assert result.returncode == 0, result.stderr
-    combined = result.stdout.lower()
-    assert 'would update marketplace' in combined
+    assert 'Would update marketplace: yet-another-statusline' in result.stdout
+    assert 'Would add marketplace' not in result.stdout
+
+
+@requires_full_preflight
+@pytest.mark.parametrize(
+    'source, recorded',
+    [
+        ({'source': 'github', 'repo': 'tmck-code/yet-another-statusline'}, 'none'),
+        ({'source': 'github', 'repo': 'tmck-code/yet-another-statusline', 'ref': 'docs'}, 'docs'),
+    ],
+    ids=['no-ref', 'docs-ref'],
+)
+def test_dry_run_replaces_marketplace_not_on_main(full_dry_env, source, recorded):
+    config_dir, plugin_root, env = full_dry_env
+    _seed_installed_plugins(config_dir, plugin_root)
+    _seed_known_marketplace(config_dir, source)
+    result = run_install('--full', '--dry-run', env_extra=env)
+    assert result.returncode == 0, result.stderr
+    assert f"Would replace marketplace on ref '{recorded}' with main" in result.stdout
+    assert f'Would add marketplace: {MARKETPLACE_SOURCE}' in result.stdout
 
 
 @requires_full_preflight
