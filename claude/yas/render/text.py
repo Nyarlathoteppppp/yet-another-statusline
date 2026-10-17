@@ -322,7 +322,7 @@ def _token_offsets(plain: str) -> list[int]:
 def fmt_tok(n: int) -> str:
     # Promote at the rounding boundary (>= 999.95 rounds to 1000.0 at .1f) so the
     # result never exceeds 6 visible chars ("999.9B") and stays within the token
-    # column budget (IN_W/CACHE_W/OUT_W = 6). Without the billions tier, a
+    # column budget (Renderer.TOK_NUM_W = 6). Without the billions tier, a
     # multi-billion day total renders as "4660.5M" (7 chars) and pushes that
     # row's dividers one cell out of alignment.
     if n >= 999_950_000:

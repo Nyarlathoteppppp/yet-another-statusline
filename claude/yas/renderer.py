@@ -404,7 +404,7 @@ class Renderer:
     def path_git(
         self, short_pwd: str, git: GitInfo,
         *, show_path: bool = True, show_commit: bool = True, show_dirty: bool = True,
-        show_icons: bool = True,
+        show_icons: bool = True, logo_icon: str | None = None,
     ) -> str:
         dirty = ''
         if show_dirty:
@@ -423,11 +423,18 @@ class Renderer:
         # middle-ellipsis). show_path=False yields the branch-only rung (glyph +
         # arrow + branch) used as a width-degradation step below the path forms.
         path_part = f'{self.PWD}{short_pwd}{self.R} ' if show_path else ''
-        # With icons off there is no glyph to reserve the row's usual 2-col
-        # left margin -- fall back to a single literal space so the path row
-        # lines up with rows that reserve their margin via a fixed-width
-        # rjust instead of an icon (e.g. context_line's `fmt_tok(...):>6`).
-        glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ' '
+        # A configured logo_icon replaces the folder glyph and is the one
+        # icon show_icons cannot hide -- it is the user's chosen brand mark,
+        # rendered literally (no glyph_mode translation).
+        # With icons off and no logo there is no glyph to reserve the row's
+        # usual 2-col left margin -- fall back to a single literal space so
+        # the path row lines up with rows that reserve their margin via a
+        # fixed-width rjust instead of an icon (e.g. context_line's
+        # `fmt_tok(...):>6`).
+        if logo_icon:
+            glyph_part = f'{logo_icon}  '
+        else:
+            glyph_part = f'{GLYPH_FOLDER}  ' if show_icons else ' '
 
         return (
             f'{self.ICON_PATH}{glyph_part}{path_part}'
@@ -436,15 +443,18 @@ class Renderer:
             f'{commit_part}{dirty}'
         )
 
-    def path_glyph_only(self, show_icons: bool = True) -> str:
+    def path_glyph_only(self, show_icons: bool = True, logo_icon: str | None = None) -> str:
         """Presence-glyph floor: the folder glyph alone (1 visible column).
 
         The overflow-safe terminal state of the path ladder — it can never
         exceed the available width or disturb the box border math.
         ``show_icons`` (default on) gates the folder glyph itself; with icons
         hidden there is nothing left to present, so the floor degrades to an
-        empty string (0 visible columns).
+        empty string (0 visible columns). A configured ``logo_icon`` overrides
+        both: it survives ``show_icons=False`` and renders literally.
         """
+        if logo_icon:
+            return f'{self.ICON_PATH}{logo_icon}{self.R}'
         if not show_icons:
             return ''
         return f'{self.ICON_PATH}{GLYPH_FOLDER}{self.R}'
@@ -459,6 +469,7 @@ class Renderer:
     def fit_path(
         self, short_pwd: str, git: GitInfo, target_w: int,
         *, compact_only: bool = False, show_icons: bool = True,
+        logo_icon: str | None = None,
     ) -> str:
         def fits(s: str) -> bool:
             return _visible_width(s) <= target_w
@@ -469,15 +480,15 @@ class Renderer:
         # middle-ellipsized: it is shown in full or dropped whole, and the
         # branch outlives the path. compact_only enters at the compact rung.
         # show_icons gates the leading folder glyph (path_git / glyph-only
-        # floor); path_git_compact never carried the glyph, so it is
-        # unaffected either way.
+        # floor), unless logo_icon overrides it; path_git_compact never
+        # carried the glyph, so it is unaffected either way.
         if not compact_only:
             for kwargs in (
                 {},
                 {'show_commit': False},
                 {'show_commit': False, 'show_dirty': False},
             ):
-                candidate = self.path_git(short_pwd, git, show_icons=show_icons, **kwargs)
+                candidate = self.path_git(short_pwd, git, show_icons=show_icons, logo_icon=logo_icon, **kwargs)
                 if fits(candidate):
                     return candidate
 
@@ -488,13 +499,13 @@ class Renderer:
         # Path omitted whole, branch retained (glyph + arrow + branch).
         branch_only = self.path_git(
             short_pwd, git, show_path=False, show_commit=False, show_dirty=False,
-            show_icons=show_icons,
+            show_icons=show_icons, logo_icon=logo_icon,
         )
         if fits(branch_only):
             return branch_only
 
         # Glyph-only presence floor — 1 visible column, always within target.
-        return self.path_glyph_only(show_icons=show_icons)
+        return self.path_glyph_only(show_icons=show_icons, logo_icon=logo_icon)
 
     def model_colour(self, model_name: str) -> str:
         return self.theme.models[model_key(model_name)].label
@@ -1694,24 +1705,45 @@ class Renderer:
         return out
 
     RATE_W  = 6
-    IN_W    = 6
-    CACHE_W = 6
-    OUT_W   = 6
+    TOK_NUM_W = 6   # max visible width of any `fmt_tok` value ("999.9K")
 
     # Per-slot caps (in spaces) for the justify breathing room. Each slot fills
     # from its 1-space minimum toward the cap as slack allows; leftover slack
     # after every cap is met still feeds the rate/sparkline leader (as before).
     JUSTIFY_PAD_CAP = 4
 
-    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, trailing_content: str = '', session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None, show_icons: bool = True, show_cost: bool = True) -> tuple[list[str], tuple[int, ...], int, int, bool]:
+    @staticmethod
+    def token_counts_shown(show_day_stats: bool, token_counts: tuple[bool, bool]) -> tuple[bool, bool]:
+        """Effective ``(session, day)`` visibility for the tokens row's cells:
+        day stats off is session-only; both false is treated as both true."""
+        if not show_day_stats:
+            return (True, False)
+        show_sess, show_day = token_counts
+        if not (show_sess or show_day):
+            return (True, True)
+        return (show_sess, show_day)
+
+    @classmethod
+    def token_group_w(cls, show_day_stats: bool, token_counts: tuple[bool, bool]) -> int:
+        """Visible width of one in/cache/out group: ``N`` or ``N/N``."""
+        show_sess, show_day = cls.token_counts_shown(show_day_stats, token_counts)
+        return 2 * cls.TOK_NUM_W + 1 if show_sess and show_day else cls.TOK_NUM_W
+
+    def tokens_cost(self, sess_in: int, sess_cache: int, sess_out: int, day_in: int, day_cache: int, day_out: int, sess_cost: float, day_cost: float, trailing_content: str = '', session_id: str = '', box_width: int = 80, fill: float = 1.0, show_day_stats: bool = True, justify: bool = False, lines: tuple[int, int] | None = None, show_icons: bool = True, show_cost: bool = True, trailing_right: Callable[[int], str] | None = None, token_counts: tuple[bool, bool] = (True, True)) -> tuple[list[str], tuple[int, ...], int, int, bool]:
         """One content line: tokens │ [lines │] cost │ [trailing_content].
 
         Invariants:
 
-        - ``show_day_stats`` merges session/day per field as ``session/day``
-          with a paired cache parenthetical; off, the row is session-only.
+        - ``show_day_stats`` merges session/day per field as ``session/day``;
+          off, the row is session-only.
+        - ``token_counts`` ``(session, day)`` (day stats on only) narrows each
+          in/cache/out cell to the session count, the day count, or both
+          (``session/day``, the default). Cost is unaffected. Both false is
+          treated as both true.
+        - Every token number is right-justified to ``TOK_NUM_W`` and groups
+          are one space apart, so the tokens column is fixed-width.
         - ``justify`` (with day stats on) spends genuine slack as padding
-          *inside* the tokens/cost sections (capped at ``JUSTIFY_PAD_CAP``),
+          *inside* the cost section (capped at ``JUSTIFY_PAD_CAP``),
           never touching ``min_width`` — at the tight floor the row is
           byte-identical to ``justify`` off.
         - The tokens/cost/lines columns are sized to their *measured* content
@@ -1760,48 +1792,43 @@ class Renderer:
         # They start at their minimums (gaps 1 space, edge pads 0) so the
         # measured widths and ``min_width`` below are the tight floor; ``justify``
         # widens them from genuine slack only (see the pad block after min_width).
-        gap1 = gap2 = ' '   # ↓in/day | (cache) | ↑out/day inter-group gaps
+        gap1 = gap2 = ' '   # ↓in | cache | ↑out inter-group gaps
         cost_lpad = cost_rpad = ''
 
-        if show_day_stats:
-            # Merged session/day per field; variable width, no fixed rjust (D2)
-            # -- except the row's LEADING number (`sess_in`), which is
-            # right-justified to `IN_W` (the same fixed width the
-            # session-only rung below uses) so it shares a stable right
-            # edge with row 2's context-fill number (also rjust'd, in
-            # `context_line`) and has headroom to grow (e.g. 25.9K ->
-            # 123.0K) without shifting every column after it or ending up
-            # flush against the row's left border.
-            cache = (f'{self.TOK_DIM}({fmt_tok(sess_cache)}{self.R}'
-                     f'{self.TOK_DAY_DIM}/{fmt_tok(day_cache)}{self.R}'
-                     f'{self.TOK_DIM}){self.R}')
+        # Token cells: every number is right-justified to TOK_NUM_W (the max
+        # `fmt_tok` width), groups are separated by exactly one space, and the
+        # cache group carries no parentheses. At max values this reads e.g.
+        # `↓ 123.1K 123.1K ↑ 123.9K`; smaller values keep their right edge, so
+        # the dividers never move as counts grow. `token_counts` picks the
+        # session count, the day count, or both as `sess/day` (day stats off
+        # forces session-only). Group geometry lives in `token_group_w`.
+        show_sess, show_day = self.token_counts_shown(show_day_stats, token_counts)
+        num_w = self.TOK_NUM_W
 
-            def build_tokens() -> str:
-                return (
-                    f'{self.LABEL}{self.BOLDY}{in_icon}{self.R}'
-                    f'{self.TOK}{fmt_tok(sess_in).rjust(self.IN_W)}{self.R}{self.TOK_DAY_DIM}/{fmt_tok(day_in)}{self.R}{gap1}'
-                    f'{cache}'
-                    f'{self.LABEL}{gap2}{self.BOLDY}{out_icon}{self.R}'
-                    f'{self.TOK}{fmt_tok(sess_out)}{self.R}{self.TOK_DAY_DIM}/{fmt_tok(day_out)}{self.R}'
-                )
+        def group(sess: int, day: int, clr: str) -> str:
+            if show_sess and show_day:
+                return (f'{clr}{fmt_tok(sess).rjust(num_w)}{self.R}'
+                        f'{self.TOK_DAY_DIM}/{fmt_tok(day).rjust(num_w)}{self.R}')
+            return f'{clr}{fmt_tok(sess if show_sess else day).rjust(num_w)}{self.R}'
 
-            def build_cost() -> str:
-                cost_icon = f'{self.safe}{ICON_COST}{self.R}  ' if show_icons else ''
-                return (f'{cost_lpad}{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}'
-                        f'{self.LABEL} / {self.R}{day_clr}${day_cost:,.2f}{self.R}{cost_rpad}')
+        def build_tokens() -> str:
+            return (
+                f'{self.LABEL}{self.BOLDY}{in_icon}{self.R}'
+                f'{group(sess_in, day_in, self.TOK)}{gap1}'
+                f'{group(sess_cache, day_cache, self.TOK_DIM)}'
+                f'{self.LABEL}{gap2}{self.BOLDY}{out_icon}{self.R}'
+                f'{group(sess_out, day_out, self.TOK)}'
+            )
 
-            tokens_col = build_tokens()
-            cost_col   = build_cost()
-        else:
-            # Session-only: original per-field justification (D2).
-            sess_in_s    = fmt_tok(sess_in).rjust(self.IN_W)
-            sess_cache_s = fmt_tok(sess_cache).rjust(self.CACHE_W)
-            sess_out_s   = fmt_tok(sess_out).rjust(self.OUT_W)
-            tokens_col = (f'{self.LABEL}{self.BOLDY}{in_icon}{self.R}{self.TOK}{sess_in_s}{self.R} '
-                          f'{self.TOK_DIM}({sess_cache_s}){self.R}{self.LABEL} '
-                          f'{self.BOLDY}{out_icon}{self.R}{self.TOK}{sess_out_s}{self.R}')
+        def build_cost() -> str:
             cost_icon = f'{self.safe}{ICON_COST}{self.R}  ' if show_icons else ''
-            cost_col = f'{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}'
+            if not show_day_stats:
+                return f'{cost_lpad}{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}{cost_rpad}'
+            return (f'{cost_lpad}{cost_icon}{self.COST}${sess_cost:,.2f}{self.R}'
+                    f'{self.LABEL} / {self.R}{day_clr}${day_cost:,.2f}{self.R}{cost_rpad}')
+
+        tokens_col = build_tokens()
+        cost_col   = build_cost()
 
         def build_lines() -> str:
             # Mirrors the tokens column's own glyph-pair convention (icon,
@@ -1888,7 +1915,15 @@ class Renderer:
         # plugins" section is always shown, blank-padded when there is
         # nothing to display, so its border (divider + ┬/┴ elbows + label)
         # never disappears just because no skills/plugins are loaded.
-        min_width_with_trailing = min_width + min(trailing_w, PLUGINS_TRAILING_MIN_W) + vsep_trailing_w
+        # Split with `trailing_right` (embedded context bar), the segment needs
+        # room for BOTH halves plus their inner vsep, else the left half
+        # degrades to a bare `…`; shed it so the caller gives the context bar
+        # its own full-width row instead.
+        trailing_min = (
+            2 * PLUGINS_TRAILING_MIN_W + vsep_trailing_w if trailing_right is not None
+            else min(trailing_w, PLUGINS_TRAILING_MIN_W)
+        )
+        min_width_with_trailing = min_width + trailing_min + vsep_trailing_w
         include_trailing = box_width >= min_width_with_trailing
         if include_trailing:
             inner -= vsep_trailing_w  # the trailing segment's own vsep
@@ -1916,7 +1951,9 @@ class Renderer:
             # padding a column that's about to be discarded would move
             # `tokens_w`/`cost_w` off their honest floor for no visible gain.
             cost_cap = cap if show_cost else 0
-            slots = [cap - 1, cap - 1, cost_cap, cost_cap]  # gap1, gap2, cost_l, cost_r
+            # gap1/gap2 get no slot: the token groups are fixed-width with a
+            # single-space gap (see TOK_NUM_W), so justify never widens them.
+            slots = [0, 0, cost_cap, cost_cap]  # gap1, gap2, cost_l, cost_r
             give  = [0, 0, 0, 0]
             budget = min(free, sum(slots))
             while budget > 0 and any(give[i] < slots[i] for i in range(len(slots))):
@@ -1993,6 +2030,30 @@ class Renderer:
             else:
                 trailing = ''
 
+        # `trailing_right` splits the trailing segment 50/50: `trailing_right(w)`
+        # rendered at its share `w` on the left, a second │, and the existing
+        # trailing content on the right. The split is measured off
+        # the trailing segment's actual start column (which differs with
+        # show_cost) through to the box's content edge, so the right half
+        # always lands flush against the closing │.
+        right_col = 0
+        if include_trailing and trailing_right is not None:
+            if show_cost:
+                start_col = trailing_col + 2
+            else:
+                start_col = (col2 if include_lines else col1) + 2
+            region_w = (box_width - 3) - (start_col - 3)
+            left_w   = (region_w - vsep_trailing_w) // 2
+            right_w  = region_w - vsep_trailing_w - left_w
+            if left_w > 0 and right_w > 0:
+                left       = trailing_right(left_w)
+                left_vw    = _visible_width(left)
+                left       = clip_visible(left, left_w) if left_vw > left_w else left + ' ' * (left_w - left_vw)
+                right_col  = start_col + left_w + 2
+                right      = clip_visible(trailing_content, right_w) if trailing_w > right_w else trailing_content
+                right     += ' ' * max(0, right_w - _visible_width(right))
+                trailing   = f'{left}{self.vsep_block(right_col, box_width, fill=fill, leader=True)}{right}'
+
         vsep_cols: tuple[int, ...]
         if include_trailing and not show_cost:
             # No cost column to sit between -- attach trailing straight to the
@@ -2017,6 +2078,8 @@ class Renderer:
         else:
             line = f'{tokens_col}{vsep}{cost_col}'
             vsep_cols = (col1,)
+        if right_col:
+            vsep_cols += (right_col,)
 
         # Shed ladder rungs (see the docstring's Invariants for the ordering).
         # `has_lines_final` is set explicitly per rung actually used, rather

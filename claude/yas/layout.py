@@ -815,7 +815,7 @@ def build_medium(
     target_w = (width - 4) - vsep_w - rate_w - right_w
     line_path = r.fit_path(
         session.short_pwd, git, target_w, compact_only=True,
-        show_icons=view.cfg.show_icons,
+        show_icons=view.cfg.show_icons, logo_icon=view.cfg.logo_icon,
     )
     path_w   = _visible_width(line_path)
 
@@ -866,6 +866,32 @@ def build_medium(
     append_error_row(rows, view.cfg, width, r)
     spec.rows = rows
     return spec
+
+
+def _full_label_anchor(text: str, lo: int, hi: int, blocked: set[int]) -> int | None:
+    """1-indexed anchor for `text` in the first fill run within [lo, hi]
+    (inclusive, 1-indexed) that holds the whole label plus a 1-col lead-in
+    dash, skipping `blocked` columns (elbows, pill edge). When no run holds
+    it, the longest run (so the shrunk prefix is as long as possible); None
+    if the cell has no fill run at all."""
+    need = len(text) + 1
+    best: tuple[int, int] | None = None  # (run length, run start)
+    run_start = None
+    for col in range(lo, hi + 2):
+        if col <= hi and col not in blocked:
+            if run_start is None:
+                run_start = col
+            continue
+        if run_start is not None:
+            run_len = col - run_start
+            if run_len >= need:
+                return run_start + 1
+            if best is None or run_len > best[0]:
+                best = (run_len, run_start)
+        run_start = None
+    if best is None:
+        return None
+    return best[1] + 1 if best[0] > 1 else best[1]
 
 
 def build_wide(
@@ -919,6 +945,22 @@ def build_wide(
     # read/changed segment into `tokens_cost` below. Accepted +2.9ms cost per
     # design.md Decision 6. This cost can be amortized when transcripts are
     # unchanged via the transcript cache (openspec/changes/cache-transcript-parses).
+    embedded_ctx: list[str] = []
+    ctx_compact:  list[bool] = []
+
+    def _embedded_context(w: int) -> str:
+        line = r.context_line(
+            ctx, w, soft_limit, state_labels=view.cfg.context_labels if view.cfg.context_state else None,
+            state_thresholds=view.cfg.context_thresholds, show_icons=view.cfg.show_icons,
+        )
+        # Near the wide-layout floor the half-cell is too narrow for the rich
+        # form; fall back to the compact percent + bar rather than clipping.
+        if _visible_width(line) > w:
+            line = r.context_line_compact(ctx, w, soft_limit)
+            ctx_compact.append(True)
+        embedded_ctx.append(line)
+        return line
+
     line_tokens, vsep_cols, _mark_col, tokens_min_w, has_lines_seg = r.tokens_cost(
         usage.billed_in, usage.cache_read, usage.out,
         token_log.day_in, token_log.day_cache_read, token_log.day_out,
@@ -928,7 +970,16 @@ def build_wide(
         lines=(view.tool_counts.lines_read, view.tool_counts.lines_changed),
         show_icons=view.cfg.show_icons,
         show_cost=view.cfg.show_cost,
+        trailing_right=_embedded_context,
+        token_counts=view.cfg.token_counts,
     )
+    # The context bar rides the tokens row as the left half of the trailing
+    # segment, skills + plugins the right half (tokens_cost splits it 50/50
+    # and appends the extra │ between them to `vsep_cols`). When the trailing segment is shed
+    # (narrow box) there is no extra column and the context bar falls back to
+    # its own full-width row between the path row and the tokens row.
+    _base_vseps = 1 + (1 if has_lines_seg else 0) + (1 if view.cfg.show_cost else 0)
+    ctx_embedded = len(vsep_cols) > _base_vseps
     # The tokens │ [lines │] cost │ [skills+plugins] row is fixed-content-width:
     # at the bottom of the wide band (box ~80-84) it cannot hold the tokens and
     # cost columns without overflowing the box and detaching its │ from the
@@ -1025,9 +1076,9 @@ def build_wide(
             # — commit, then commit+changes — shed within this phase; the dir
             # itself, priority 4, is not touched yet).
             _dirfull_candidates = (
-                r.path_git(session.short_pwd, git, show_icons=view.cfg.show_icons),
-                r.path_git(session.short_pwd, git, show_commit=False, show_icons=view.cfg.show_icons),
-                r.path_git(session.short_pwd, git, show_commit=False, show_dirty=False, show_icons=view.cfg.show_icons),
+                r.path_git(session.short_pwd, git, show_icons=view.cfg.show_icons, logo_icon=view.cfg.logo_icon),
+                r.path_git(session.short_pwd, git, show_commit=False, show_icons=view.cfg.show_icons, logo_icon=view.cfg.logo_icon),
+                r.path_git(session.short_pwd, git, show_commit=False, show_dirty=False, show_icons=view.cfg.show_icons, logo_icon=view.cfg.logo_icon),
             )
             _dirfull_fit = next((c for c in _dirfull_candidates if _visible_width(c) <= target_w), None)
             if _dirfull_fit is not None:
@@ -1053,7 +1104,7 @@ def build_wide(
             # own compact -> branch-only -> glyph-only ladder (priorities 4, 3).
             _compact_path = r.fit_path(
                 session.short_pwd, git, target_w, compact_only=True,
-                show_icons=view.cfg.show_icons,
+                show_icons=view.cfg.show_icons, logo_icon=view.cfg.logo_icon,
             )
             if _visible_width(_compact_path) <= target_w:
                 return _TopRowShed(
@@ -1426,7 +1477,15 @@ def build_wide(
     # `context` over `30.0K` — extends left into the gap rather than spilling
     # right into the next label.
     ctx_labels: list[tuple[str, int]] = []
-    if view.cfg.labels and tokens_fits:
+    if ctx_embedded:
+        # Embedded context: the labelled text is the left half of the tokens
+        # row's trailing cell, which starts 2 cols past the │ before it
+        # (col-form) — shift every label anchor from content col 3 there.
+        _ctx_shift = vsep_cols[-2] + 2 - 3
+        line_context = embedded_ctx[-1]
+    else:
+        _ctx_shift = 0
+    if view.cfg.labels and tokens_fits and not (ctx_embedded and ctx_compact):
         _ctx_plain = _ANSI_RE.sub('', line_context)
         _ctx_off   = _token_offsets(_ctx_plain)
         _hg = next((k for k, o in enumerate(_ctx_off) if _ctx_plain[o] == GLYPH_HOURGLASS), None)
@@ -1442,9 +1501,10 @@ def build_wide(
                     _ctx_end = _ctx_off[_k]
                     while _ctx_end + 1 < len(_ctx_plain) and _ctx_plain[_ctx_end + 1] != ' ':
                         _ctx_end += 1
-                    ctx_labels.append((_name, max(3, 3 + _ctx_end - len(_name) + 1)))
-    rows.append(RowSpec('separator_dim', ups=path_row_ups, pill=pill, labels=ctx_labels))
-    rows.append(RowSpec('content', content=line_context))
+                    ctx_labels.append((_name, max(3, 3 + _ctx_end - len(_name) + 1) + _ctx_shift))
+    if not ctx_embedded:
+        rows.append(RowSpec('separator_dim', ups=path_row_ups, pill=pill, labels=ctx_labels))
+        rows.append(RowSpec('content', content=line_context))
 
     # Two elbows: one per vsep │ in the single tokens line. The old 60s tick
     # marker (a third elbow) was removed once the bar became a flat 60s window.
@@ -1456,8 +1516,8 @@ def build_wide(
         # three token columns left of the first vsep │ (input at the ↓ icon,
         # cache at the '(' parenthetical, output at the ↑ icon after the ')'),
         # cost centred in its own cell, and "skills + plugins" over the
-        # trailing column when present. The `sess/day` suffix names the
-        # session/day pair shown only when day stats are on.
+        # trailing column when present. Labels are plain words in every
+        # `show_day_stats` / `token_counts` mode (no sess/day suffix).
         #
         # `vsep_cols` (0-3 entries) doesn't self-describe which segments it
         # bounds — (lines segment, trailing segment) are each independently
@@ -1468,53 +1528,41 @@ def build_wide(
         # glyph — that glyph is itself gated on `show_icons`, so with icons
         # off the glyph-sniff silently read `False` even when the segment
         # was present, dropping the 'loc r/w' label and mis-anchoring
-        # 'cost sess/day' onto the wrong (elbow) column. `has_trailing_seg`
+        # 'cost' onto the wrong (elbow) column. `has_trailing_seg`
         # then follows from the arithmetic (vsep_cols length == 1 +
         # has_lines + has_trailing).
         tok_labels: list[tuple[str, int]] = []
+        # The embedded context│skills divider is not a tokens segment; drop it
+        # so the segment arithmetic below still sees tokens/lines/cost/trailing
+        # only (the skills + plugins label anchors past it, at vsep_cols[-1]).
+        _tok_vseps = vsep_cols[:-1] if ctx_embedded else vsep_cols
         if view.cfg.labels:
-            _tp      = _ANSI_RE.sub('', line_tokens[0])
-            _cache_i = _tp.find('(')
-            _close_i = _tp.find(')', _cache_i + 1) if _cache_i != -1 else -1
-            _out_i   = -1
-            if _close_i != -1:
-                _j = _close_i + 1
-                while _j < len(_tp) and _tp[_j] == ' ':
-                    _j += 1
-                if _j < len(_tp):
-                    _out_i = _j
-            _suf = ' sess/day' if view.cfg.show_day_stats else ''
-            tok_labels.append((f'input{_suf}', 3))
-            if _cache_i != -1:
-                # Centre `cache` over the `(…)` parenthetical (anchor = section
-                # midpoint − half the label width). When the column has room the
-                # label sits centred over its value; but with the long ` sess/day`
-                # suffix the centred label reaches back into the `input` columns,
-                # so fall back to the original left-anchor at the '(' rather than
-                # cannibalising `input` — centring is best-effort, applied only
-                # when it fits.
-                _cache_lbl = f'cache{_suf}'
-                _cache_end = _close_i if _close_i != -1 else _cache_i
-                _cache_mid = 3 + (_cache_i + _cache_end) // 2
-                _cache_anchor = max(3, _cache_mid - len(_cache_lbl) // 2)
-                if _cache_anchor < 3 + len(f'input{_suf}'):
-                    _cache_anchor = 3 + _cache_i
-                tok_labels.append((_cache_lbl, _cache_anchor))
-            if _out_i != -1:
-                tok_labels.append((f'output{_suf}', 3 + _out_i))
+            # The token groups are fixed-width (see `Renderer.token_group_w`),
+            # so their columns are computed rather than sniffed from the text:
+            # [icon] in ␠ cache ␠ [icon] out. Each label centres over its
+            # number column (ties round right, toward the right-aligned value).
+            _grp_w  = r.token_group_w(view.cfg.show_day_stats, view.cfg.token_counts)
+            _icon_w = 2 if view.cfg.show_icons else 0
+            _in_i    = _icon_w
+            _cache_i = _in_i + _grp_w + 1
+            _out_i   = _cache_i + _grp_w + 1 + _icon_w
+            for _word, _col in (('input', _in_i), ('cache', _cache_i), ('output', _out_i)):
+                tok_labels.append((_word, 3 + _col + max(0, (_grp_w - len(_word) + 1) // 2)))
             _has_lines_seg = has_lines_seg
+            _cost_cell: tuple[int, int] | None = None   # (lo, hi) border cols
             if view.cfg.show_cost:
-                _has_trailing_seg = len(vsep_cols) > (1 + (1 if _has_lines_seg else 0))
+                _has_trailing_seg = len(_tok_vseps) > (1 + (1 if _has_lines_seg else 0))
                 # Centre `cost` within its cell instead of left-anchoring at the
                 # cell's start. The cell's left edge is the tokens│ (no lines
                 # segment) or lines│ (lines segment) vsep; its right edge is the
                 # cost│skills-plugins vsep when that trailing segment is present,
                 # else the cell runs unbounded to the row's own end (no right
                 # anchor to centre against, so left-anchor with a fixed offset).
-                _cost_left = vsep_cols[1] if _has_lines_seg else vsep_cols[0]
-                _cost_lbl  = f'cost{_suf}'
+                _cost_left = _tok_vseps[1] if _has_lines_seg else _tok_vseps[0]
+                _cost_lbl  = 'cost'
                 if _has_trailing_seg:
-                    _cost_mid = (_cost_left + vsep_cols[-1]) // 2
+                    _cost_mid = (_cost_left + _tok_vseps[-1]) // 2
+                    _cost_cell = (_cost_left + 1, _tok_vseps[-1] - 1)
                     tok_labels.append((_cost_lbl, max(_cost_left + 1, _cost_mid - len(_cost_lbl) // 2)))
                     tok_labels.append(('skills + plugins', vsep_cols[-1] + 2))
                 else:
@@ -1523,7 +1571,7 @@ def build_wide(
                 # No cost column: the trailing divider (if present) attaches
                 # straight to lines│ (or tokens│ with no lines) instead of a
                 # cost│ boundary -- see `tokens_cost`'s show_cost=False shape.
-                _has_trailing_seg = len(vsep_cols) > (1 if _has_lines_seg else 0)
+                _has_trailing_seg = len(_tok_vseps) > (1 if _has_lines_seg else 0)
                 if _has_trailing_seg:
                     tok_labels.append(('skills + plugins', vsep_cols[-1] + 2))
             # `lines read/changed` caption, centred between the first two vseps
@@ -1537,9 +1585,42 @@ def build_wide(
             # re-centred once `_overlay_labels` picks a shorter rendered form).
             if _has_lines_seg:
                 _lines_disp = LABEL_ABBREVIATIONS.get(LINES_LABEL, LINES_LABEL)
-                _lines_mid  = (vsep_cols[0] + vsep_cols[1]) // 2
-                tok_labels.append((LINES_LABEL, max(vsep_cols[0] + 1, _lines_mid - len(_lines_disp) // 2)))
-        rows.append(RowSpec('separator_dim', downs=vsep_cols, labels=tok_labels))
+                _lines_mid  = (_tok_vseps[0] + _tok_vseps[1]) // 2
+                tok_labels.append((LINES_LABEL, max(_tok_vseps[0] + 1, _lines_mid - len(_lines_disp) // 2)))
+        if ctx_embedded:
+            if view.cfg.labels:
+                # The separator is shared with the path row, so its ┴ elbows (and
+                # the pill's bottom edge) can split the right-half cell's fill run
+                # and clip the caption to `skills +…`. Re-anchor it to the first
+                # run inside the cell that holds the full text (else the longest).
+                _blocked = set(path_row_ups) | set(vsep_cols)
+                if pill is not None and pill.start > 0:
+                    _blocked |= set(range(pill.start - 1, pill.end + 2))
+                _sk_anchor = _full_label_anchor('skills + plugins', vsep_cols[-1] + 1, width - 1, _blocked)
+                if _sk_anchor is not None:
+                    tok_labels = [
+                        (name, _sk_anchor if name == 'skills + plugins' else col)
+                        for name, col in tok_labels
+                    ]
+                # Same hazard for the centred `cost`: if a path-row ┴ lands
+                # inside its span, re-anchor to a run in its cell that holds it.
+                _cost_at = next((col for name, col in tok_labels if name == 'cost'), None)
+                if _cost_cell is not None and _cost_at is not None \
+                        and _blocked & set(range(_cost_at - 1, _cost_at + len('cost') + 1)):
+                    _c_anchor = _full_label_anchor('cost', *_cost_cell, _blocked)
+                    if _c_anchor is not None:
+                        tok_labels = [
+                            (name, _c_anchor if name == 'cost' else col)
+                            for name, col in tok_labels
+                        ]
+            rows.append(RowSpec(
+                'separator_dim', ups=path_row_ups, downs=vsep_cols, pill=pill,
+                # Overlay wants left-to-right anchors; the context labels sit
+                # between the cost and skills + plugins labels.
+                labels=sorted(tok_labels + ctx_labels, key=lambda lbl: lbl[1]),
+            ))
+        else:
+            rows.append(RowSpec('separator_dim', downs=vsep_cols, labels=tok_labels))
         for lt in line_tokens:
             rows.append(RowSpec('content', content=lt))
 

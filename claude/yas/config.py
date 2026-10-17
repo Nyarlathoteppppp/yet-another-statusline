@@ -15,6 +15,7 @@ rejection (any source) is recorded in debug_lines for YAS_DEBUG stderr output.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -108,6 +109,42 @@ def _parse_show_day_stats(raw: object, origin: str) -> bool:
     raise ValueError('expected a boolean')
 
 
+DEFAULT_TOKEN_COUNTS: tuple[bool, bool] = (True, True)  # (session, day)
+_TOKEN_COUNTS_WORDS = {
+    'both':    (True, True),
+    'session': (True, False),
+    'day':     (False, True),
+}
+
+
+def _parse_token_counts(raw: object, origin: str) -> tuple[bool, bool]:
+    """``(session, day)`` visibility for the tokens row's in/cache/out cells.
+
+    TOML takes a table ``{ session = bool, day = bool }``; a missing key keeps
+    its default (true), an unknown key or non-bool value rejects the whole
+    knob. From CLI/env it takes a word: ``session``, ``day`` or ``both``.
+    Both false is meaningless (an empty cell), so it is treated as both true.
+    """
+    if isinstance(raw, dict):
+        unknown = set(raw) - {'session', 'day'}
+        if unknown:
+            raise ValueError(f'unknown key(s) {sorted(unknown)!r}; expected session, day')
+        vals = [raw.get(k, True) for k in ('session', 'day')]
+        if not all(isinstance(v, bool) for v in vals):
+            raise ValueError('expected session/day booleans')
+        session, day = vals
+    elif origin == 'cli' or origin.startswith('env'):
+        word = str(raw).strip().lower()
+        if word not in _TOKEN_COUNTS_WORDS:
+            raise ValueError(f"expected one of {', '.join(_TOKEN_COUNTS_WORDS)}, got {word!r}")
+        session, day = _TOKEN_COUNTS_WORDS[word]
+    else:
+        raise ValueError('expected a table { session = bool, day = bool }')
+    if not (session or day):
+        return DEFAULT_TOKEN_COUNTS
+    return (session, day)
+
+
 def _parse_theme(raw: object, origin: str) -> str:
     name = str(raw).strip()
     if name in THEMES:
@@ -120,6 +157,34 @@ def _parse_bg_shift(raw: object, origin: str) -> str:
     if v in ('warm', 'cool'):
         return v
     raise ValueError(f'expected warm or cool, got {v!r}')
+
+
+_LOGO_ESCAPE_RE = re.compile(r'^(?:\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8})$')
+_VARIATION_SELECTORS = ('\ufe0e', '\ufe0f')
+
+
+def _parse_logo_icon(raw: object, origin: str) -> str:
+    """Parse a user-supplied replacement for the top-left folder glyph.
+
+    Accepts a single character, or its literal ``\\uXXXX`` / ``\\UXXXXXXXX``
+    escape form for the sources that do not decode escapes themselves (env
+    vars and TOML literal single-quoted strings; TOML basic double-quoted
+    strings arrive already decoded by tomllib). One code point, optionally
+    followed by one variation selector -- anything longer is rejected so the
+    row's column math cannot drift.
+    """
+    value = str(raw).strip()
+    if not value:
+        raise ValueError('expected a glyph, got an empty value')
+    if _LOGO_ESCAPE_RE.match(value):
+        try:
+            value = codecs.decode(value, 'unicode_escape')
+        except (UnicodeDecodeError, ValueError) as e:
+            raise ValueError(f'undecodable escape {raw!r} ({e})') from e
+    core = value[:-1] if len(value) == 2 and value[-1] in _VARIATION_SELECTORS else value
+    if len(core) != 1:
+        raise ValueError(f'expected a single character, got {value!r}')
+    return value
 
 
 def _parse_glyph_mode(raw: object, origin: str) -> str:
@@ -472,9 +537,9 @@ class Config:
     __slots__ = (
         'max_width', 'full_width', 'justify', 'labels', 'soft_limit',
         'token_window', 'theme', 'bg_shift', 'glyph_mode', 'single_width',
-        'show_day_stats', 'show_cost', 'context_state', 'context_labels', 'context_thresholds',
+        'show_day_stats', 'show_cost', 'token_counts', 'context_state', 'context_labels', 'context_thresholds',
         'show_render_time', 'show_tool_uses', 'show_tokens_over_time', 'soft_limit_models',
-        'openspec_scan_depth', 'show_icons', 'transcript_cache', 'rate_limit_rules',
+        'openspec_scan_depth', 'show_icons', 'logo_icon', 'transcript_cache', 'rate_limit_rules',
         'rate_limit_weights', 'errors', 'debug_lines',
     )
 
@@ -490,6 +555,7 @@ class Config:
     single_width:       bool
     show_day_stats:     bool
     show_cost:          bool
+    token_counts:       tuple[bool, bool]
     context_state:      bool
     context_labels:     tuple[str, ...]
     context_thresholds: tuple[int, ...]
@@ -499,6 +565,7 @@ class Config:
     soft_limit_models:  tuple[tuple[str, int], ...]
     openspec_scan_depth: int
     show_icons:         bool
+    logo_icon:          str | None
     transcript_cache:   bool
     rate_limit_rules:   dict[str, RateLimitRule]
     rate_limit_weights: RateLimitWeights
@@ -519,6 +586,7 @@ class Config:
         single_width:       bool = False,
         show_day_stats:     bool = DEFAULT_SHOW_DAY_STATS,
         show_cost:          bool = DEFAULT_SHOW_COST,
+        token_counts:       tuple[bool, bool] = DEFAULT_TOKEN_COUNTS,
         context_state:      bool = DEFAULT_CONTEXT_STATE,
         context_labels:     tuple[str, ...] = DEFAULT_CONTEXT_LABELS,
         context_thresholds: tuple[int, ...] = DEFAULT_CONTEXT_THRESHOLDS,
@@ -528,6 +596,7 @@ class Config:
         soft_limit_models:  tuple[tuple[str, int], ...] = (),
         openspec_scan_depth: int = DEFAULT_OPENSPEC_SCAN_DEPTH,
         show_icons:         bool = True,
+        logo_icon:          str | None = None,
         transcript_cache:   bool = DEFAULT_TRANSCRIPT_CACHE,
         rate_limit_rules:   dict[str, RateLimitRule] | None = None,
         rate_limit_weights: RateLimitWeights = DEFAULT_RATE_LIMIT_WEIGHTS,
@@ -547,6 +616,7 @@ class Config:
         s(self, 'single_width', single_width)
         s(self, 'show_day_stats', show_day_stats)
         s(self, 'show_cost', show_cost)
+        s(self, 'token_counts', token_counts)
         s(self, 'context_state', context_state)
         s(self, 'context_labels', context_labels)
         s(self, 'context_thresholds', context_thresholds)
@@ -556,6 +626,7 @@ class Config:
         s(self, 'soft_limit_models', soft_limit_models)
         s(self, 'openspec_scan_depth', openspec_scan_depth)
         s(self, 'show_icons', show_icons)
+        s(self, 'logo_icon', logo_icon)
         s(self, 'transcript_cache', transcript_cache)
         s(self, 'rate_limit_rules', rate_limit_rules if rate_limit_rules is not None else {})
         s(self, 'rate_limit_weights', rate_limit_weights)
@@ -574,13 +645,15 @@ class Config:
                 f'token_window={self.token_window}, theme={self.theme!r}, bg_shift={self.bg_shift!r}, '
                 f'glyph_mode={self.glyph_mode!r}, single_width={self.single_width}, '
                 f'show_day_stats={self.show_day_stats}, show_cost={self.show_cost}, '
+                f'token_counts={self.token_counts!r}, '
                 f'context_state={self.context_state}, '
                 f'context_labels={self.context_labels!r}, context_thresholds={self.context_thresholds!r}, '
                 f'show_render_time={self.show_render_time}, show_tool_uses={self.show_tool_uses}, '
                 f'show_tokens_over_time={self.show_tokens_over_time}, '
                 f'soft_limit_models={self.soft_limit_models!r}, '
                 f'openspec_scan_depth={self.openspec_scan_depth}, '
-                f'show_icons={self.show_icons}, transcript_cache={self.transcript_cache}, '
+                f'show_icons={self.show_icons}, logo_icon={self.logo_icon!r}, '
+                f'transcript_cache={self.transcript_cache}, '
                 f'rate_limit_rules={self.rate_limit_rules!r}, '
                 f'rate_limit_weights={self.rate_limit_weights!r}, '
                 f'errors={self.errors!r}, debug_lines={self.debug_lines!r})')
@@ -669,6 +742,10 @@ class Config:
             'show_icons',
             _env_sources(env, 'YAS_SHOW_ICONS') + toml_src(glyphs, 'show_icons'),
             _parse_bool, True, errors, debug)
+        logo_icon = _resolve(
+            'logo_icon',
+            _env_sources(env, 'YAS_LOGO_ICON') + toml_src(glyphs, 'logo_icon'),
+            _parse_logo_icon, None, errors, debug)
         show_day_stats = _resolve(
             'show_day_stats',
             _env_sources(env, 'YAS_SHOW_DAY_STATS') + toml_src(tokens, 'show_day_stats'),
@@ -677,6 +754,10 @@ class Config:
             'show_cost',
             _env_sources(env, 'YAS_SHOW_COST') + toml_src(tokens, 'show_cost'),
             _parse_bool, DEFAULT_SHOW_COST, errors, debug)
+        token_counts = _resolve(
+            'token_counts',
+            _env_sources(env, 'YAS_TOKEN_COUNTS') + toml_src(tokens, 'token_counts'),
+            _parse_token_counts, DEFAULT_TOKEN_COUNTS, errors, debug)
         show_render_time = _resolve(
             'show_render_time',
             _env_sources(env, 'YAS_SHOW_RENDER_TIME') + toml_src(layout, 'show_render_time'),
@@ -740,6 +821,7 @@ class Config:
             single_width=single_width,
             show_day_stats=show_day_stats,
             show_cost=show_cost,
+            token_counts=token_counts,
             context_state=context_state,
             context_labels=context_labels,
             context_thresholds=context_thresholds,
@@ -749,6 +831,7 @@ class Config:
             soft_limit_models=tuple(soft_limit_models),
             openspec_scan_depth=openspec_scan_depth,
             show_icons=show_icons,
+            logo_icon=logo_icon,
             transcript_cache=transcript_cache,
             rate_limit_rules=rate_limit_rules,
             rate_limit_weights=rate_limit_weights,

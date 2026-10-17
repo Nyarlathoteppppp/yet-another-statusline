@@ -669,6 +669,58 @@ def test_env_show_icons_overrides_toml_false(tmp_path: Path) -> None:
     assert cfg.show_icons is True
 
 
+# 4.4c logo_icon resolution (env → toml → default None)
+
+def test_logo_icon_default_is_none(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.logo_icon is None
+
+
+@requires_tomllib
+def test_toml_logo_icon_basic_string(tmp_path: Path) -> None:
+    """A TOML basic (double-quoted) string is decoded by tomllib itself."""
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nlogo_icon = "\u2605"\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.logo_icon == '\u2605'
+
+
+@requires_tomllib
+def test_toml_logo_icon_literal_escape_is_decoded(tmp_path: Path) -> None:
+    """A TOML literal (single-quoted) string keeps the backslash-u form raw,
+    so the parser has to decode it itself."""
+    (tmp_path / 'yas.toml').write_text("[appearance.glyphs]\nlogo_icon = '\\uf8f1'\n")
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.logo_icon == '\uf8f1'
+
+
+def test_env_logo_icon_escape_is_decoded(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={'YAS_LOGO_ICON': '\\uf8f1'}, config_dir=tmp_path)
+    assert cfg.logo_icon == '\uf8f1'
+
+
+@requires_tomllib
+def test_env_logo_icon_overrides_toml(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nlogo_icon = "\u2605"\n')
+    cfg = config.Config.load(env={'YAS_LOGO_ICON': '\u2665'}, config_dir=tmp_path)
+    assert cfg.logo_icon == '\u2665'
+
+
+@requires_tomllib
+def test_toml_logo_icon_multi_char_rejected(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nlogo_icon = "ab"\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.logo_icon is None
+    assert 'logo_icon' in cfg.errors
+
+
+@requires_tomllib
+def test_toml_logo_icon_empty_rejected(tmp_path: Path) -> None:
+    (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nlogo_icon = "   "\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.logo_icon is None
+    assert 'logo_icon' in cfg.errors
+
+
 @requires_tomllib
 def test_toml_selects_glyph_mode(tmp_path: Path) -> None:
     (tmp_path / 'yas.toml').write_text('[appearance.glyphs]\nmode = "unicode"\n')
@@ -1054,3 +1106,50 @@ def test_readonly_dir_cache_write_swallowed(tmp_path: Path) -> None:
         assert not (tmp_path / 'yas' / 'cache' / 'config.toml.cache').exists()
     finally:
         os.chmod(tmp_path, 0o700)
+
+
+# token_counts (session/day visibility of the tokens row's in/cache/out cells)
+
+def test_token_counts_default_both(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.token_counts == (True, True)
+
+
+@requires_tomllib
+@pytest.mark.parametrize(('table', 'expected'), [
+    ('{ session = true, day = true }',   (True, True)),
+    ('{ session = true, day = false }',  (True, False)),
+    ('{ session = false, day = true }',  (False, True)),
+    ('{ session = false }',              (False, True)),   # partial: day keeps default
+    ('{ day = false }',                  (True, False)),
+    ('{}',                               (True, True)),
+    ('{ session = false, day = false }', (True, True)),    # both off -> both on
+])
+def test_toml_token_counts(tmp_path: Path, table: str, expected: tuple[bool, bool]) -> None:
+    (tmp_path / 'yas.toml').write_text(f'[tokens]\ntoken_counts = {table}\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.token_counts == expected
+    assert 'token_counts' not in cfg.errors
+
+
+@requires_tomllib
+@pytest.mark.parametrize('value', ['{ session = "no" }', '{ week = true }', 'true', '"session"'])
+def test_toml_token_counts_invalid_rejected(tmp_path: Path, value: str) -> None:
+    (tmp_path / 'yas.toml').write_text(f'[tokens]\ntoken_counts = {value}\n')
+    cfg = config.Config.load(env={}, config_dir=tmp_path)
+    assert cfg.token_counts == (True, True)
+    assert 'token_counts' in cfg.errors
+
+
+@pytest.mark.parametrize(('word', 'expected'), [
+    ('session', (True, False)), ('DAY', (False, True)), ('both', (True, True)),
+])
+def test_env_token_counts(tmp_path: Path, word: str, expected: tuple[bool, bool]) -> None:
+    cfg = config.Config.load(env={'YAS_TOKEN_COUNTS': word}, config_dir=tmp_path)
+    assert cfg.token_counts == expected
+
+
+def test_env_token_counts_invalid_falls_back(tmp_path: Path) -> None:
+    cfg = config.Config.load(env={'YAS_TOKEN_COUNTS': 'week'}, config_dir=tmp_path)
+    assert cfg.token_counts == (True, True)
+    assert 'token_counts' not in cfg.errors   # env rejections stay debug-only

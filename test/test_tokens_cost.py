@@ -76,11 +76,10 @@ def test_tokens_cost_divider_cols_match_rendered_bars_with_lines_segment() -> No
         assert stripped[col - 3] == '│'
 
 
-def test_tokens_cost_dividers_track_content() -> None:
-    # Columns hug their measured content, so larger token/cost magnitudes push
-    # the first (tokens|cost) divider further right than tiny content — it is
-    # not pinned to a fixed budget. The reported col must still match the
-    # rendered │ exactly.
+def test_tokens_cost_tokens_divider_fixed_across_magnitude() -> None:
+    # Every token number is right-justified to its max width, so the
+    # tokens|cost divider does not move as counts grow; the cost cell still
+    # hugs its content. The reported col must still match the rendered │.
     l1, s_cols, _m1, _s1, _h1 = _call(
         sess_in=1, sess_cache=0, sess_out=2,
         day_in=3, day_cache=0, day_out=4, sess_cost=0.01, day_cost=0.02,
@@ -90,7 +89,8 @@ def test_tokens_cost_dividers_track_content() -> None:
         day_in=1_904_000, day_cache=18_300_000, day_out=612_500,
         sess_cost=3.27, day_cost=41.88,
     )
-    assert b_cols[0] > s_cols[0]
+    assert b_cols[0] == s_cols[0]
+    assert b_cols[1] > s_cols[1]   # cost '$3.27 / $41.88' > '$0.01 / $0.02'
     for line, cols in ((l1[0], s_cols), (l2[0], b_cols)):
         stripped = strip_ansi(line)
         for col in cols:
@@ -168,7 +168,10 @@ def test_tokens_cost_trailing_content_dropped_when_genuinely_no_room() -> None:
     # tokens|cost shape -- a merely-too-narrow-for-the-FULL-list box (see
     # test_tokens_cost_trailing_content_truncated_to_fill_available_width)
     # truncates instead.
-    lines, cols, _mark, _min, _has_lines = _call(box_width=50, trailing_content='x' * 200)
+    # A box that ends where the trailing divider would sit: tokens|cost fits,
+    # but not + PLUGINS_TRAILING_MIN_W and its vsep.
+    box = _call(box_width=200)[1][-1]
+    lines, cols, _mark, _min, _has_lines = _call(box_width=box, trailing_content='x' * 200)
     assert len(cols) == 1
     assert 'x' * 200 not in strip_ansi(lines[0])
 
@@ -255,7 +258,8 @@ def test_tokens_cost_merged_session_day_content() -> None:
         sess_cost=3.27, day_cost=41.88,
     )
     s = strip_ansi(lines[0])
-    assert '↓ 128.4K/1.9M (1.2M/18.3M) ↑ 47.3K/612.5K' in s
+    # Each number right-justified to 6 cols, groups 1 space apart, no parens.
+    assert '↓ 128.4K/  1.9M   1.2M/ 18.3M ↑  47.3K/612.5K' in s
     assert '$3.27 / $41.88' in s
 
 
@@ -270,7 +274,8 @@ def test_tokens_cost_session_only_content() -> None:
     )
     s = strip_ansi(lines[0])
     # Session figures present, justified; no day figure or day cost anywhere.
-    assert '128.4K' in s and '(' in s and '47.3K' in s
+    assert '↓ 128.4K   1.2M ↑  47.3K' in s
+    assert '(' not in s
     assert '$3.27' in s
     assert '1.9M' not in s
     assert '18.3M' not in s
@@ -391,18 +396,18 @@ def test_tokens_cost_justify_off_unchanged() -> None:
     assert (a_lines, a_cols, a_mark, a_min, a_h) == (b_lines, b_cols, b_mark, b_min, b_h)
 
 
-def test_tokens_cost_justify_widens_gaps_and_pads_to_cap() -> None:
-    # At a wide box with plenty of slack, justify fills every slot to the 4-space
-    # cap: the two tokens inter-group gaps become 4, and the cost LHS/RHS each
-    # get 4 spaces.
+def test_tokens_cost_justify_pads_cost_only_to_cap() -> None:
+    # At a wide box with plenty of slack, justify pads the cost LHS/RHS to the
+    # 4-space cap; the token groups are fixed-width and keep their 1-space gaps.
     on,  _c_on,  _m_on,  _s_on, _h_on  = _call(box_width=160, justify=True,  **_JUSTIFY)
     off, _c_off, _m_off, _s_off, _h_off = _call(box_width=160, justify=False, **_JUSTIFY)
     s_on  = strip_ansi(on[0])
     s_off = strip_ansi(off[0])
 
-    # Inter-group gaps widen from 1 to the 4-space cap.
-    assert '/872.0K    (34.6K/33.0M)    ↑ 258/306.1K' in s_on
-    assert '/872.0K (34.6K/33.0M) ↑ 258/306.1K' in s_off
+    # Token groups are unchanged by justify.
+    tokens = '↓  17.9K/872.0K  34.6K/ 33.0M ↑    258/306.1K'
+    assert tokens in s_on
+    assert tokens in s_off
 
     # Cost section gains 4 spaces of LHS padding. The vsep renders as '  │ '
     # (2-col lead, divider, 1 trailing space), so the LHS cap shows as the 1
@@ -531,7 +536,7 @@ def test_tokens_cost_show_icons_false_session_only_drops_cost_icon() -> None:
 
 
 # show_icons=False, show_day_stats=True: with no icon to reserve the row's
-# left margin, `sess_in` (the leading number) is right-justified to `IN_W`
+# left margin, `sess_in` (the leading number) is right-justified to `TOK_NUM_W`
 # instead. Two things this must guarantee: (1) the reserved width matches
 # row 2's context-fill number (also rjust'd, in `context_line`) so the two
 # rows' leading digits share the same right edge -- regardless of how many
@@ -543,10 +548,10 @@ def test_tokens_cost_show_icons_false_leading_number_right_justified() -> None:
     lines, _cols, _mark, _min, _has_lines = _call(show_icons=False, sess_in=1)
     stripped = strip_ansi(lines[0])
     # Row content starts right after the single border-gap space border_line
-    # always inserts; IN_W is the reserved field width for the leading number.
-    lead_field = stripped[:Renderer.IN_W]
+    # always inserts; TOK_NUM_W is the reserved field width for the leading number.
+    lead_field = stripped[:Renderer.TOK_NUM_W]
     assert lead_field.rstrip(' ').endswith('1')
-    assert lead_field == '1'.rjust(Renderer.IN_W)
+    assert lead_field == '1'.rjust(Renderer.TOK_NUM_W)
 
 
 def test_tokens_cost_show_icons_false_leading_number_right_edge_stable_across_magnitude() -> None:
@@ -559,9 +564,9 @@ def test_tokens_cost_show_icons_false_leading_number_right_edge_stable_across_ma
     huge  = strip_ansi(_call(show_icons=False, sess_in=123_000)[0][0])
     # The char immediately after the reserved field (the day-count '/') sits
     # at the same offset regardless of sess_in's magnitude.
-    assert small[Renderer.IN_W] == '/'
-    assert big[Renderer.IN_W]   == '/'
-    assert huge[Renderer.IN_W]  == '/'
+    assert small[Renderer.TOK_NUM_W] == '/'
+    assert big[Renderer.TOK_NUM_W]   == '/'
+    assert huge[Renderer.TOK_NUM_W]  == '/'
 
 
 def test_tokens_cost_show_icons_false_leading_number_matches_context_line_margin() -> None:
@@ -579,8 +584,8 @@ def test_tokens_cost_show_icons_false_leading_number_matches_context_line_margin
     # Both fields are right-justified to 6 columns from the row's start
     # (border_line's leading space is stripped from both here, since neither
     # string above includes it -- they're raw section content).
-    assert ctx_line[:Renderer.IN_W].rstrip(' ')[-1] == tok_line[:Renderer.IN_W].rstrip(' ')[-1]
-    assert len(ctx_line[:Renderer.IN_W]) == len(tok_line[:Renderer.IN_W]) == Renderer.IN_W
+    assert ctx_line[:Renderer.TOK_NUM_W].rstrip(' ')[-1] == tok_line[:Renderer.TOK_NUM_W].rstrip(' ')[-1]
+    assert len(ctx_line[:Renderer.TOK_NUM_W]) == len(tok_line[:Renderer.TOK_NUM_W]) == Renderer.TOK_NUM_W
 
 
 def test_tokens_cost_show_icons_true_leading_number_unchanged() -> None:
@@ -654,3 +659,45 @@ def test_tokens_cost_show_cost_default_is_true() -> None:
     column for callers that go through Config -- see layout.py's call site."""
     line = strip_ansi(_call()[0][0])
     assert '$' in line
+
+
+# token_counts: session-only / day-only / both for the in/cache/out cells
+
+_COUNTS = dict(sess_in=1_000, sess_cache=2_000, sess_out=3_000,
+               day_in=40_000, day_cache=50_000, day_out=60_000)
+
+
+@pytest.mark.parametrize(('counts', 'expected'), [
+    ((True, True),   '↓   1.0K/ 40.0K   2.0K/ 50.0K ↑   3.0K/ 60.0K'),
+    ((True, False),  '↓   1.0K   2.0K ↑   3.0K'),
+    ((False, True),  '↓  40.0K  50.0K ↑  60.0K'),
+    ((False, False), '↓   1.0K/ 40.0K   2.0K/ 50.0K ↑   3.0K/ 60.0K'),
+])
+def test_tokens_cost_token_counts_modes(counts: tuple[bool, bool], expected: str) -> None:
+    lines, cols, _m, _min, _h = _call(token_counts=counts, **_COUNTS)
+    tokens_cell = strip_ansi(lines[0])[:cols[0] - 3]
+    assert tokens_cell.rstrip() == expected
+    if counts in ((True, False), (False, True)):
+        assert '/' not in tokens_cell
+        # The cost cell is unaffected and still shows session / day.
+        assert ' / ' in strip_ansi(lines[0])
+    assert _visible_width(lines[0]) <= BOX_WIDTH
+
+
+def test_tokens_cost_single_count_narrows_tokens_divider() -> None:
+    _l, both_cols, *_ = _call(token_counts=(True, True), **_COUNTS)
+    _l, sess_cols, *_ = _call(token_counts=(True, False), **_COUNTS)
+    _l, day_cols, *_  = _call(token_counts=(False, True), **_COUNTS)
+    assert sess_cols[0] == day_cols[0] < both_cols[0]
+
+
+@pytest.mark.parametrize('counts', [(True, True), (True, False), (False, True)])
+def test_tokens_cost_max_values_one_space_apart(counts: tuple[bool, bool]) -> None:
+    # At max-width values every number fills its 6-col slot, so exactly one
+    # space separates adjacent numbers (the ↑ icon owns its own trailing space).
+    big = dict(sess_in=999_000, sess_cache=999_000, sess_out=999_000,
+               day_in=999_000, day_cache=999_000, day_out=999_000)
+    lines, cols, *_ = _call(token_counts=counts, show_icons=False, **big)
+    cell = strip_ansi(lines[0])[:cols[0] - 3].rstrip()
+    group = '999.0K/999.0K' if counts == (True, True) else '999.0K'
+    assert cell == f'{group} {group} {group}'

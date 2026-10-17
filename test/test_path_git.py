@@ -229,3 +229,57 @@ class TestPathGitShowIcons:
         git = GitInfo(branch='main', commit='abc1234')
         out = strip_ansi(r.path_git('~/proj', git, show_icons=False))
         assert out.startswith(' ~/proj')
+
+
+# logo_icon: a user-configured replacement for the folder glyph, rendered
+# literally and exempt from show_icons gating.
+
+class TestPathGitLogoIcon:
+    LOGO = '★'
+
+    def _git(self) -> GitInfo:
+        return GitInfo(branch='main', commit='abc1234')
+
+    def test_logo_icon_replaces_folder_glyph(self) -> None:
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        out = r.path_git('~/proj', self._git(), logo_icon=self.LOGO)
+        assert GLYPH_FOLDER not in out
+        assert strip_ansi(out).startswith(f'{self.LOGO}  ~/proj')
+
+    def test_logo_icon_survives_show_icons_false(self) -> None:
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        out = r.path_git('~/proj', self._git(), show_icons=False, logo_icon=self.LOGO)
+        assert GLYPH_FOLDER not in out
+        assert strip_ansi(out).startswith(f'{self.LOGO}  ~/proj')
+
+    def test_glyph_only_floor_survives_show_icons_false(self) -> None:
+        r = Renderer()
+        out = r.path_glyph_only(show_icons=False, logo_icon=self.LOGO)
+        assert self.LOGO in strip_ansi(out)
+        assert _visible_width(out) > 0
+
+    def test_fit_path_keeps_logo_at_every_rung(self) -> None:
+        r = Renderer()
+        git = GitInfo(branch='feature/very-long-branch-name', commit='abc1234',
+                      modified=2, untracked=1)
+        full = r.path_git('~/p', git, logo_icon=self.LOGO)
+        for target_w in (_visible_width(full) + 10, _visible_width(full), 20, 5, 2):
+            result = r.fit_path('~/p', git, target_w, show_icons=False, logo_icon=self.LOGO)
+            assert self.LOGO in strip_ansi(result), target_w
+
+    def test_fit_path_glyph_floor_is_the_logo(self) -> None:
+        r = Renderer()
+        git = GitInfo(branch='feature/very-long-branch-name', commit='abc1234')
+        result = r.fit_path('~/also-very-long-path', git, 1,
+                            show_icons=False, logo_icon=self.LOGO)
+        assert result == r.path_glyph_only(show_icons=False, logo_icon=self.LOGO)
+        assert _visible_width(result) == 1
+
+    def test_logo_icon_none_keeps_folder_glyph(self) -> None:
+        from yas.constants import GLYPH_FOLDER
+        r = Renderer()
+        assert r.path_git('~/proj', self._git(), logo_icon=None) == \
+            r.path_git('~/proj', self._git())
+        assert GLYPH_FOLDER in r.path_git('~/proj', self._git(), logo_icon=None)

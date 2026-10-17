@@ -447,8 +447,9 @@ CACHE_LEAD = 3
 # ellipsis shrink of the original text, and well before a label is dropped.
 LABEL_ABBREVIATIONS: dict[str, str] = {
     'loc read/write':     'loc r/w',
-    'output sess/day':    'out sess/day',
-    'input sess/day':     'in sess/day',
+    # The embedded context cell shares its separator with the path row, whose
+    # ┴ elbows can leave too short a run for the full word.
+    'context':            'ctx',
 }
 
 # ASCII fallbacks for the non-ASCII glyphs above. Used by ascii render mode

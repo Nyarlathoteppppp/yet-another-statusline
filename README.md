@@ -101,6 +101,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `glyph_mode` | `YAS_GLYPH_MODE` (also `--glyph-mode` CLI) | — | `[appearance.glyphs].mode` | `nerdfont` |
 | `single_width` | `YAS_GLYPH_SINGLE_WIDTH` (also `--glyph-single-width` CLI) | — | `[appearance.glyphs].single_width` | `false` |
 | `show_icons` | `YAS_SHOW_ICONS` | — | `[appearance.glyphs].show_icons` | `true` |
+| `logo_icon` | `YAS_LOGO_ICON` | — | `[appearance.glyphs].logo_icon` | — (the folder glyph) |
 | `context_state` | `YAS_CONTEXT_STATE` | — | `[context].state` | `false` |
 | `context_labels` | `YAS_CONTEXT_LABELS` | — | `[context].labels` | `Smart,Coasting,Foggy,Cooked,Dumb` |
 | `context_thresholds` | `YAS_CONTEXT_THRESHOLDS` | — | `[context].thresholds` | `25,50,70,90` |
@@ -111,6 +112,7 @@ aliases when both are set — the aliases keep working but are deprecated.
 | `justify` | `YAS_JUSTIFY` | — | `[layout].justify` | `false` |
 | `show_day_stats` | `YAS_SHOW_DAY_STATS` | — | `[tokens].show_day_stats` | `true` |
 | `show_cost` | `YAS_SHOW_COST` | — | `[tokens].show_cost` | `false` |
+| `token_counts` | `YAS_TOKEN_COUNTS` (`session`/`day`/`both`) | — | `[tokens].token_counts` | `{ session = true, day = true }` |
 | `openspec_scan_depth` | `YAS_OPENSPEC_SCAN_DEPTH` | — | `[openspec].scan_depth` | `1` |
 
 #### Valid values
@@ -129,13 +131,15 @@ aliases when both are set — the aliases keep working but are deprecated.
 
 - **`single_width`** — orthogonal boolean that folds double-width dynamic content (wide emoji, CJK in branch names/paths) to width-1; combinable with any `glyph_mode`. The statusline's own glyphs are already width-1, so column geometry is preserved.
 - **`show_icons`** — when `false`, drops essentially every icon/glyph the statusline draws, including the top-left home/folder glyph. The exceptions — glyphs that still render — are the task-plan checkboxes, the subagent status markers, and the box/border and workflow structural glyphs (frame, sparkline blocks, separators, row markers). Text and numbers still render; only the glyph beside each is omitted, and column/border alignment is preserved. `true` by default, preserving current behaviour.
+- **`logo_icon`** — replaces the top-left home/folder glyph with a character of your own. It is the one exception to `show_icons = false`: a configured logo still renders, so the corner always carries your mark. The value is taken literally (no `glyph_mode` ascii/unicode translation), and may be written either as the character itself or as a `\uXXXX` / `\UXXXXXXXX` escape — handy for the env var and for TOML literal `'...'` strings, which are not unescaped by the TOML parser. Exactly one code point is accepted (optionally followed by a variation selector); anything else is rejected and the default folder glyph is kept.
 - **`full_width`** — when `true`, makes the box fill the terminal and ignore `max_width`.
 - **`show_render_time`** — when `true`, annotates the bottom-right border with the previous run's wall-clock render time (e.g. `…47.2ms──╯`). Off by default; each run shows the prior run's timing, so it is blank on a session's first render.
 - **`show_tool_uses`** — when `true`, adds a row (wide layout only) under the tokens/cost band, listing per-tool `tool_use` counts.
-- **`show_tokens_over_time`** — when `true`, adds a full-width "tokens over time" row (wide layout only) under the tokens/cost band, showing the `t/m` rate and live sparkline. The trailing column of the tokens/cost row always shows skills + plugins; the sparkline is opt-in via this row.
+- **`show_tokens_over_time`** — when `true`, adds a full-width "tokens over time" row (wide layout only) under the tokens/cost band, showing the `t/m` rate and live sparkline. The trailing column of the tokens/cost row is split 50/50 between the context bar (left) and skills + plugins (right), so the default wide layout is two content rows; the sparkline is opt-in via this row.
 - **`labels`** — when `true`, paints small superscript field captions into the border/separator rows (wide layout only). **Note:** this is a different knob from `[context].labels`, which is the five-word state list — see [Context state word](#context-state-word). The two share a key name but live in different sections and take different types.
 - **`justify`** — when `true`, aligns fields into columns instead of packing them left (wide layout only).
 - **`show_day_stats`** — when `true` (the default), shows today's cumulative token and cost totals alongside the session's, as `session/day` pairs. **Note:** this key lives under **`[tokens]`**, not `[layout]`, unlike the other display toggles.
+- **`token_counts`** — `{ session = bool, day = bool }`; picks which count the tokens row's input/cache/output cells show when `show_day_stats` is on: both (` 37.4K/120.0K`, the default), session only (` 37.4K`), or day only (`120.0K`). Every number is right-aligned in a 6-column slot (the widest `fmt_tok` value, e.g. `123.1K`) with one space between columns, so at max values the cells read `123.1K 123.1K 123.9K`; the cache figure has no parentheses. Section labels are plain `input` / `cache` / `output` / `cost` in every mode. The cost cell is unaffected. A partial table such as `{ session = false }` keeps the other key at its default (`true`); setting both to `false` is treated as both `true`.
 - **`show_cost`** — when `true`, adds the cost column (`$<sess> / $<day>` or `$<sess>` with `show_day_stats=false`) to the tokens row. `false` by default, so existing users don't see a new cost figure appear unasked; opt in explicitly. **Note:** this key also lives under **`[tokens]`**.
 - **`openspec_scan_depth`** — how many repo-levels below `cwd` the OpenSpec downward scan descends looking for nested `openspec/` roots (monorepo-of-repos layout). `1` (the default) finds a repo directly below `cwd`; `2` also finds one nested a level deeper; `0` disables the downward scan entirely (only an `openspec/` found by walking *upward* from `cwd` is used). Unlike the other numeric knobs, `0` is a legal value here.
 - **CLI flags** — `--theme NAME` / `--bg-shift DIR` also accept the `--theme=NAME` / `--bg-shift=DIR` form. Pass them in the `statusLine.command` of your `~/.claude/settings.json`.

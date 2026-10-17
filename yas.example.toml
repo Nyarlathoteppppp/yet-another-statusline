@@ -33,7 +33,8 @@
 # show_tokens_over_time = false  # bool; wide layout only — add a full-width "tokens over
 #                                #   time" row (t/m rate + sparkline) below the tokens/cost
 #                                #   row. The tokens/cost row's trailing column now always
-#                                #   shows skills + plugins. env: YAS_SHOW_TOKENS_OVER_TIME
+#                                #   is split 50/50: context bar (left), skills +
+#                                #   plugins (right). env: YAS_SHOW_TOKENS_OVER_TIME
 
 # [tokens]
 # soft_limit = 150000   # int > 0; tokens; context-fill bar / % threshold. Raise for 1M-context models.
@@ -45,6 +46,13 @@
 #                       #   show_day_stats=false) in the tokens row. Off by default so
 #                       #   existing users don't see a new cost figure appear unasked.
 #                       #   env: YAS_SHOW_COST
+# token_counts = { session = true, day = true }
+#                       # table; which count each input/cache/output cell shows (with
+#                       #   show_day_stats on): both = sess/day (default), session
+#                       #   only, or day only. Numbers are right-aligned in 6-col slots,
+#                       #   one space apart. A partial table keeps the other key's
+#                       #   default (true); both false is treated as both true. Cost is
+#                       #   unaffected. env: YAS_TOKEN_COUNTS = session | day | both
 #
 # Per-model soft_limit overrides. `match` is a case-insensitive plain substring
 # (no glob/regex) tested against the model id and display name. The LONGEST
@@ -90,6 +98,15 @@
 # beside each is omitted, and column/border alignment is preserved.
 # (env: YAS_SHOW_ICONS)
 # show_icons = true
+#
+# logo_icon replaces the top-left home/folder glyph with a character of your
+# own. It is the one exception to show_icons = false -- a configured logo still
+# renders -- and is taken literally (no mode translation above applies to it).
+# Write the character itself, or a \uXXXX / \UXXXXXXXX escape (single-quoted
+# TOML strings and env vars are not unescaped by the parser, so the escape form
+# is decoded here). Exactly one code point, optionally plus a variation
+# selector. (env: YAS_LOGO_ICON)
+# logo_icon = "\uf8f1"
 
 # [context]
 # Context state word — a morphing Smart -> Coasting -> Foggy -> Cooked -> Dumb

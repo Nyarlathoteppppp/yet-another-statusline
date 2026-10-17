@@ -177,14 +177,19 @@ def test_compact_5h_omits_remain_and_burn_rate():
 
 def test_context_separator_labels_present():
     blob = '\n'.join(strip_ansi(ln) for ln in _render_dict(_full_limits_dict()))
-    for word in ('context', 'fill', 'dumb'):
+    # `context` may render as its `ctx` abbreviation when a path-row ┴ elbow
+    # shortens its run on the shared separator.
+    assert superscript('context') in blob or superscript('ctx') in blob
+    for word in ('fill', 'dumb'):
         assert superscript(word) in blob, word
 
 
-def test_tokens_separator_sessday_suffix():
+def test_tokens_separator_labels_are_plain_words():
+    # No sess/day suffix on any tokens-row caption, cost included.
     sep = _tokens_separator(_render_dict(_full_limits_dict()))
-    assert superscript('input sess/day') in sep
-    assert superscript('cost sess/day') in sep
+    for word in ('input', 'cache', 'output', 'cost'):
+        assert superscript(word) in sep, word
+    assert superscript('sess') not in sep
 
 
 def _tok_sep_and_content(lines: list[str]) -> tuple[str, str]:
@@ -231,8 +236,10 @@ def test_cost_label_centered_in_its_cell(with_trailing: bool):
     # the row's right border (not a cost-cell vsep), so the cost cell is the pair
     # immediately preceding it — i.e. the last two INTERIOR vseps — regardless of
     # how many segments precede them.
+    # The default layout also embeds the context bar left of skills+plugins,
+    # so the cost cell is the pair before the context and skills+plugins vseps.
     bars = [i for i, ch in enumerate(cont) if ch == '│']
-    cell_center = (bars[-3] + bars[-2]) / 2                 # cost cell between vseps
+    cell_center = (bars[-4] + bars[-3]) / 2                 # cost cell between vseps
     assert abs(_label_center(sep, 'cost') - cell_center) <= 1
 
 
@@ -241,7 +248,9 @@ def test_skills_plugins_label_present_even_when_empty():
     # skills/plugins loaded -- it must not disappear along with its content.
     lines = _render_view(_short_labels_view(with_trailing=False))
     sep, _cont = _tok_sep_and_content(lines)
-    assert superscript('skills + plugins') in sep
+    # The separator is shared with the path row above, whose ┴ elbows can
+    # split the cell's fill run and shrink the label to a whole-word prefix.
+    assert superscript('skills') in sep
 
 
 def test_lines_and_cost_labels_present_with_icons_off():
@@ -266,23 +275,25 @@ def test_lines_label_centered_in_its_cell():
     lines = _render_view(_short_labels_view(with_trailing=True))
     sep, cont = _tok_sep_and_content(lines)
     bars = [i for i, ch in enumerate(cont) if ch == '│']
-    cell_center = (bars[1] + bars[2]) / 2                    # loc r/w cell
-    assert abs(_label_center(sep, 'loc r/w') - cell_center) <= 1
+    # The separator is shared with the path row, so a ┴ from above may split
+    # this cell and shrink the caption to `loc…`; it must still sit inside it.
+    start = sep.index(superscript('loc'))
+    assert bars[1] < start < bars[2]                         # loc r/w cell
 
 
-def test_cache_label_centered_over_parenthetical():
+def test_cache_label_centered_over_its_column():
+    # session-only, icons on: `│ ↓ NNNNNN CCCCCC ↑ OOOOOO`; the cache column is
+    # the 6 cols after the input column + 1-space gap.
     lines = _render_view(_short_labels_view(with_trailing=True))
-    sep, cont = _tok_sep_and_content(lines)
-    open_i, close_i = cont.index('('), cont.index(')')
-    assert abs(_label_center(sep, 'cache') - (open_i + close_i) / 2) <= 1
+    sep, _cont = _tok_sep_and_content(lines)
+    col_start = 2 + 2 + 6 + 1          # '│ ' + icon + input + gap
+    assert abs(_label_center(sep, 'cache') - (col_start + 2.5)) <= 1
 
 
-def test_cache_centering_never_mangles_input():
-    # With the long ` sess/day` labels the centred `cache` would reach back into
-    # `input`; it must fall back to left-anchoring so `input` is never truncated
-    # (the regression guard against `input` collapsing to a stub like "i").
+def test_token_labels_never_mangle_each_other():
     sep = _tokens_separator(_render_dict(_full_limits_dict()))
-    assert superscript('input sess/day') in sep
+    for word in ('input', 'cache', 'output'):
+        assert superscript(word) in sep, word
 
 
 def test_changes_label_full_and_right_aligned():
@@ -389,3 +400,21 @@ def test_section_captions_absent_when_labels_off():
     blob = '\n'.join(strip_ansi(ln) for ln in _render_view(view))
     for word in ('plan', 'specs', 'agent', 'workflow'):
         assert superscript(word) not in blob, word
+
+
+@pytest.mark.parametrize('counts', [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize('width', [120, 200])
+def test_token_counts_labels_and_alignment(counts, width):
+    view = SessionView(session_mod.SessionInfo.from_dict(_full_limits_dict()),
+                       Config(labels=True, show_cost=True, token_counts=counts))
+    lines = _render_view(view, width)
+    assert {_visible_width(ln) for ln in lines} == {width}
+    sep, cont = _tok_sep_and_content(lines)
+    # Plain captions in every mode, each fully rendered.
+    for word in ('input', 'cache', 'output', 'cost'):
+        assert superscript(word) in sep, word
+    assert superscript('sess') not in sep and superscript('day') not in sep
+    # Every interior │ of the tokens row sits on an elbow in the separator above.
+    for i, ch in enumerate(cont):
+        if ch == '│' and 0 < i < len(cont) - 1:
+            assert sep[i] in '┬┴┼', (i, sep)

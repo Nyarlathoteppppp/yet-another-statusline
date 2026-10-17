@@ -24,10 +24,16 @@ def _session() -> session_mod.SessionInfo:
     return session_mod.SessionInfo.from_dict(json.loads(SESSION.read_text()))
 
 
-def _view(session=None) -> SessionView:
+def _view(session=None, cfg: Config | None = None) -> SessionView:
     if session is None:
         session = _session()
-    return SessionView(session, Config(show_cost=True))
+    return SessionView(session, cfg or Config(show_cost=True))
+
+
+# At the wide-layout floor (box 80) only a single-count token cell leaves room
+# for the split trailing segment: both-mode cells are fixed at their max-value
+# width (`N/N` per group), so the plugin-row floor pin uses the session-only form.
+_FLOOR_CFG = Config(show_cost=True, token_counts=(True, False))
 
 
 def _tick() -> TickRecord:
@@ -119,7 +125,8 @@ def test_tokens_row_dividers_align_with_separators(monkeypatch: pytest.MonkeyPat
 
     last = len(lines[t_idx]) - 1
     interior_bars = [i for i, ch in enumerate(lines[t_idx]) if ch == '│' and 0 < i < last]
-    assert len(interior_bars) == 3, f'expected 3 interior │, got {interior_bars}'
+    # +1 for the context bar cell embedded left of skills+plugins.
+    assert len(interior_bars) == 4, f'expected 4 interior │, got {interior_bars}'
 
     above, below = lines[t_idx - 1], lines[t_idx + 1]
     for col in interior_bars:
@@ -909,7 +916,9 @@ def test_moderate_plugins_row_fills_available_width_not_pre_clipped(monkeypatch:
                             names=['a:audiovis-design', 'a:audiovis-fractal', 'a:audiovis-whereis'])))
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'dnb-expe,another-plugin'))
 
-    width = 185
+    # The trailing column now shares its width 50/50 with the context bar,
+    # and the both-mode token cell is fixed at its max-value width.
+    width = 270
     spec  = layout.build_wide(_view(), _tick(), width, _r)
     lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
     plugins_lines = [ln for ln in lines if 'audiovis-design' in ln]
@@ -1106,7 +1115,8 @@ def test_tokens_row_three_elbows_at_wide_width(monkeypatch: pytest.MonkeyPatch) 
     t_idx = _tokens_row_indices(spec)[0]
     tokens_sep = spec.rows[t_idx - 1]
     assert tokens_sep.kind == 'separator_dim'
-    assert len(tokens_sep.downs) == 3, f'expected 3 downs at width=140, got {tokens_sep.downs}'
+    # +1 for the context bar cell embedded left of skills+plugins.
+    assert len(tokens_sep.downs) == 4, f'expected 4 downs at width=140, got {tokens_sep.downs}'
 
     # And the render itself shows three interior │/┬/┴ triples aligned.
     lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
@@ -1114,7 +1124,7 @@ def test_tokens_row_three_elbows_at_wide_width(monkeypatch: pytest.MonkeyPatch) 
     above, below = lines[t_idx - 1], lines[t_idx + 1]
     last = len(content_line) - 1
     interior_bars = [i for i, ch in enumerate(content_line) if ch == '│' and 0 < i < last]
-    assert len(interior_bars) == 3, f'expected 3 interior │ at width=140, got {interior_bars}'
+    assert len(interior_bars) == 4, f'expected 4 interior │ at width=140, got {interior_bars}'
     for col in interior_bars:
         assert above[col] in ('┬', '┼'), f'no ┬ above at col {col}: {above[col]!r}'
         assert below[col] in ('┴', '┼'), f'no ┴ below at col {col}: {below[col]!r}'
@@ -1130,7 +1140,8 @@ def test_tokens_row_two_elbows_in_85_102_band(monkeypatch: pytest.MonkeyPatch) -
     t_idx = _tokens_row_indices(spec)[0]
     tokens_sep = spec.rows[t_idx - 1]
     assert tokens_sep.kind == 'separator_dim'
-    assert len(tokens_sep.downs) == 2, f'expected 2 downs at width=95, got {tokens_sep.downs}'
+    # +1 for the context bar cell embedded left of skills+plugins.
+    assert len(tokens_sep.downs) == 3, f'expected 3 downs at width=95, got {tokens_sep.downs}'
 
 
 @pytest.mark.parametrize('width', [80, 85, 90, 100, 103, 140])
@@ -1177,15 +1188,17 @@ def test_plugin_row_and_rich_context_row_copresent_at_wide_layout_floor(
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'foo,bar'))
 
-    spec  = layout.build_wide(_view(), _tick(), 80, _r)
+    spec  = layout.build_wide(_view(cfg=_FLOOR_CFG), _tick(), 80, _r)
     lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
 
     plugin_lines = [ln for ln in lines if 'foo,bar' in ln]
     assert plugin_lines, 'plugins row should render at box 80'
 
     assert _tokens_row_indices(spec), 'tokens/cost row missing at box 80 alongside the plugin row'
-    assert any('%' in ln and '(' in ln for ln in lines), \
-        'expected the rich context line (fraction form) co-present with the plugin row at box 80'
+    # The embedded context half may use its compact form here, but must show
+    # a real fill percentage rather than collapsing to a bare ellipsis.
+    row = lines[_tokens_row_indices(spec)[0]]
+    assert '%' in row, 'context fill must render alongside the plugin row at box 80'
 
 
 def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1239,7 +1252,8 @@ def test_tree_labels_loc_slash_stacks_over_data_slash(monkeypatch: pytest.Monkey
     spec = layout.build_wide(view, _tick(), 200, _r)
     out  = layout.render_layout(spec, _r)
 
-    label_line = next(ln for ln in out if 'ʳᐟʷ' in strip_ansi(ln))
+    # Last match: the tokens separator above also carries a 'loc r/w' caption.
+    label_line = [ln for ln in out if 'ʳᐟʷ' in strip_ansi(ln)][-1]
     data_line  = next(ln for ln in out if 'Explore' in strip_ansi(ln) or 'test desc' in strip_ansi(ln))
     label_plain = strip_ansi(label_line)
     data_plain  = strip_ansi(data_line)
@@ -1304,6 +1318,27 @@ def test_helper_row_show_icons_false_drops_5h7d_and_flame_when_gaps_widen(
         plain = '\n'.join(strip_ansi(ln) for ln in out)
         for glyph in (ICON_LIMIT_5H, ICON_LIMIT_7D, GLYPH_BURN_FAST, GLYPH_BURN_SLOW):
             assert glyph not in plain, f'{glyph!r} leaked at width={width} with show_icons=False'
+
+
+def test_path_row_logo_icon_survives_show_icons_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured logo_icon is the one icon show_icons cannot hide: it
+    replaces the folder glyph in the path row and still renders with icons
+    off, while the box stays square. (build_medium is not covered: its path
+    row is `path_git_compact`, which has never carried a leading glyph.)"""
+    from yas.constants import GLYPH_FOLDER
+    from helper import strip_ansi
+
+    logo = '\u2605'
+    _silence_dynamic(monkeypatch)
+    view = SessionView(_session(), Config(show_icons=False, logo_icon=logo))
+    for width in (120, 160, 200):
+        spec  = layout.build_wide(view, _tick(), width, _r)
+        out   = layout.render_layout(spec, _r)
+        plain = '\n'.join(strip_ansi(ln) for ln in out)
+        assert logo in plain, f'logo missing from build_wide at width={width}'
+        assert GLYPH_FOLDER not in plain
+        widths = {len(strip_ansi(ln)) for ln in out}
+        assert len(widths) == 1, f'build_wide ragged at width={width}: {widths}'
 
 
 def test_path_row_show_icons_false_drops_folder_glyph(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1580,3 +1615,80 @@ def test_top_row_justify_matches_unjustified_when_slack_absorbed_by_cap(
             )
 
 
+
+
+@pytest.mark.parametrize('width', [100, 140, 200])
+def test_context_bar_shares_tokens_row_left_of_skills(monkeypatch: pytest.MonkeyPatch, width: int) -> None:
+    """Default layout is 2 content rows: the context bar sits on the tokens
+    row, left of skills+plugins, splitting that trailing cell 50/50."""
+    from helper import strip_ansi
+    _silence_dynamic(monkeypatch)
+    spec    = layout.build_wide(_view(), _tick(), width, _r)
+    content = [row for row in spec.rows if row.kind == 'content']
+    assert len(content) == 2
+
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    t_idx = _tokens_row_indices(spec)[0]
+    row   = lines[t_idx]
+    bars  = [i for i, ch in enumerate(row) if ch == '│']
+    assert '%' in row[bars[-3]:bars[-2]]
+    assert '%' not in row[bars[-2]:]
+    # Bar-to-bar spans: the inner │ carries a 2-col leading gap ('  │ ')
+    # that the closing border does not, so equal cells differ by 2 here.
+    ctx_w    = bars[-2] - bars[-3] - 2
+    skills_w = bars[-1] - bars[-2]
+    assert abs(skills_w - ctx_w) <= 1
+
+
+@pytest.mark.parametrize('with_skills', [False, True])
+@pytest.mark.parametrize('show_cost', [False, True])
+@pytest.mark.parametrize('width', [120, 130, 200])
+def test_skills_plugins_label_over_right_half(
+    monkeypatch: pytest.MonkeyPatch, width: int, show_cost: bool, with_skills: bool,
+) -> None:
+    """The full `skills + plugins` caption (not a `skills +…` prefix) sits
+    over the right half of the split trailing cell, loaded or not -- even when
+    a path-row ┴ elbow lands inside that half on the shared separator."""
+    from helper import strip_ansi
+    from yas.info.skills import LoadedSkills
+    from yas.render.text import superscript
+    _silence_dynamic(monkeypatch)
+    view = SessionView(_session(), Config(labels=True, show_cost=show_cost))
+    if with_skills:
+        view.__dict__['skills'] = LoadedSkills(names=['demo:skill'])
+    spec = layout.build_wide(view, _tick(), width, _r)
+
+    sep_i = next(i for i, row in enumerate(spec.rows) if row.kind == 'separator_dim' and row.downs)
+    lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
+    sep   = lines[sep_i]
+    divider = spec.rows[sep_i].downs[-1] - 1                  # 0-indexed context│skills
+    assert sep.index(superscript('skills + plugins')) > divider
+
+
+def test_full_label_anchor_skips_elbow_split_run() -> None:
+    """A ┴ that splits the right-half cell must not clip the caption: the
+    anchor moves to the first run past it that holds the whole label."""
+    label = 'skills + plugins'
+    # Cell cols 50..100; an elbow at 55 leaves only 4 fill cols before it.
+    assert layout._full_label_anchor(label, 50, 100, {55}) == 57
+    # Nothing blocking: anchor one dash in from the cell start.
+    assert layout._full_label_anchor(label, 50, 100, set()) == 51
+    # No run is long enough: fall back to the longest one.
+    assert layout._full_label_anchor(label, 50, 70, {55, 62}) == 64   # run 63..70
+
+
+@pytest.mark.parametrize('width', [160, 200])
+def test_skills_plugins_label_full_with_pill(monkeypatch: pytest.MonkeyPatch, width: int) -> None:
+    """With the model pill painting its bottom edge on the shared separator,
+    the full caption still renders where the right half has room."""
+    from helper import strip_ansi
+    from yas.render.text import superscript
+    _silence_dynamic(monkeypatch)
+    d = json.loads(SESSION.read_text())
+    d['thinking'] = {'enabled': True}
+    d['effort']   = {'level': 'high'}
+    d['model']    = {'id': 'claude-opus-4-7', 'display_name': 'Opus 4.7'}
+    view = SessionView(session_mod.SessionInfo.from_dict(d), Config(labels=True))
+    spec = layout.build_wide(view, _tick(), width, _r)
+    blob = '\n'.join(strip_ansi(ln) for ln in layout.render_layout(spec, _r))
+    assert superscript('skills + plugins') in blob
