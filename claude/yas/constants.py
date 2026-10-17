@@ -263,6 +263,14 @@ PLUGINS_TRAILING_MAX_W = 300
 # any list wider than the free space, rather than truncating it.
 PLUGINS_TRAILING_MIN_W = 8
 
+# Box width at/above which the tokens row's trailing cell is split into the
+# embedded context bar (left) + skills/plugins (right). 114 == terminal width
+# 120 (the box is COLUMNS - 6), the user-facing threshold. Below it the split is
+# never attempted: skills/plugins are dropped and the context bar takes its
+# own full-width row. Deterministic by width (the fit guard in `tokens_cost`
+# stays as a secondary check), and the same for every `token_counts` mode.
+TRAILING_SPLIT_MIN_BOX_W = 114
+
 # Minimum gap between the narrow tasks-header's left cluster (glyph + done/total)
 # and its right-anchored active-task timer. The timer is flush to the content
 # edge to use the otherwise-dead trailing space as a second anchor (mirroring the

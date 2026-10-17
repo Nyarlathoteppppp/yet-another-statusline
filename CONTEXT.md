@@ -300,7 +300,7 @@ _Avoid_: "gather the day total" (the **Day Total** is *written*, not gathered �
 
 - **Billed Input** + **Cache Read** + **Output** are the three fields of the single-line tokens row. Each merges this session with its **Day Total** counterpart as `session/day` (`↓ <sess>/<day> (<sess_cache>/<day_cache>) ↑ <sess>/<day>`); cost is `$<sess> / $<day>`. The **Day Stats Toggle** (`show_day_stats=false`) drops every `/day` half, leaving the session-only form. The **Cost Toggle** (`show_cost=false`, the default) drops the cost column entirely, independent of `show_day_stats`.
 - The bar's *length* and *colour* both track raw consumption against the **Soft Limit** / **Compaction-Risk Zone** (length = `used_tokens / soft_limit`, full at 150K). The model's **Context Window Size** drives only the secondary `(N%)` headroom figure in parentheses — so a 1M-context model can show a full bar while still having window headroom.
-- The skills/plugins row is always rendered; when both lists are empty it shows `*none*` under each icon to preserve layout.
+- Skills/plugins render (wide layout) as the right half of the tokens row's trailing cell, beside the context bar, only at terminal width >= 120 (box >= 114, `TRAILING_SPLIT_MIN_BOX_W`); below that they are dropped and the context bar takes its own full-width row. When shown with both lists empty it shows `*none*` under each icon to preserve layout.
 
 ## Example dialogue
 

@@ -1131,17 +1131,15 @@ def test_tokens_row_three_elbows_at_wide_width(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_tokens_row_two_elbows_in_85_102_band(monkeypatch: pytest.MonkeyPatch) -> None:
-    """At width=95 (85 <= width < 103) the lines segment is shed, but the
-    trailing "skills + plugins" divider is still present (always shown once
-    the box has room): the tokens/cost separator row threads 2 elbows
-    (tokens|cost, cost|skills+plugins)."""
+    """At width=95 (85 <= width < 103) the lines segment is shed, and below
+    TRAILING_SPLIT_MIN_BOX_W the skills + plugins half is dropped too: the
+    tokens/cost separator row threads only the tokens|cost elbow."""
     _silence_dynamic(monkeypatch)
     spec = layout.build_wide(_view(), _tick(), 95, _r)
     t_idx = _tokens_row_indices(spec)[0]
     tokens_sep = spec.rows[t_idx - 1]
     assert tokens_sep.kind == 'separator_dim'
-    # +1 for the context bar cell embedded left of skills+plugins.
-    assert len(tokens_sep.downs) == 3, f'expected 3 downs at width=95, got {tokens_sep.downs}'
+    assert len(tokens_sep.downs) == 1, f'expected 1 down at width=95, got {tokens_sep.downs}'
 
 
 @pytest.mark.parametrize('width', [80, 85, 90, 100, 103, 140])
@@ -1174,16 +1172,11 @@ def test_context_row_upgrades_at_wide_layout_floor(monkeypatch: pytest.MonkeyPat
         'expected the rich context line (fraction form) at box 80, not the compact one'
 
 
-def test_plugin_row_and_rich_context_row_copresent_at_wide_layout_floor(
+def test_plugins_dropped_and_rich_context_row_at_wide_layout_floor(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empirical pin for the fixed inconsistency: at box 80 (terminal 86),
-    with plugin data present, the plugin row and the rich context row (token
-    total + fraction, e.g. '16.0K (8%) 11%') must both render together --
-    there must be no band where the plugin row shows while the context row
-    is still degraded to the compact percent-only form. Before
-    TOKENS_COST_MIN_WIDTH was aligned to MEDIUM_WIDTH, the plugin row (gated
-    only by MEDIUM_WIDTH=80) could appear up to 5 box-columns ahead of the
-    rich context row (previously gated at 85)."""
+    """At box 80 (below TRAILING_SPLIT_MIN_BOX_W) skills + plugins are
+    dropped even with plugin data present, and the context bar renders on its
+    own full-width row in the rich (fraction) form alongside the tokens row."""
     from helper import strip_ansi
     _silence_dynamic(monkeypatch)
     monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'foo,bar'))
@@ -1191,14 +1184,11 @@ def test_plugin_row_and_rich_context_row_copresent_at_wide_layout_floor(
     spec  = layout.build_wide(_view(cfg=_FLOOR_CFG), _tick(), 80, _r)
     lines = [strip_ansi(ln) for ln in layout.render_layout(spec, _r)]
 
-    plugin_lines = [ln for ln in lines if 'foo,bar' in ln]
-    assert plugin_lines, 'plugins row should render at box 80'
-
-    assert _tokens_row_indices(spec), 'tokens/cost row missing at box 80 alongside the plugin row'
-    # The embedded context half may use its compact form here, but must show
-    # a real fill percentage rather than collapsing to a bare ellipsis.
+    assert not any('foo,bar' in ln for ln in lines), 'plugins must be dropped at box 80'
+    assert _tokens_row_indices(spec), 'tokens/cost row missing at box 80'
     row = lines[_tokens_row_indices(spec)[0]]
-    assert '%' in row, 'context fill must render alongside the plugin row at box 80'
+    assert '%' not in row, 'context bar must not share the tokens row at box 80'
+    assert any('%' in ln and '(' in ln for ln in lines), 'expected the rich context row at box 80'
 
 
 def test_clear_timer_no_additional_elbow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1617,7 +1607,7 @@ def test_top_row_justify_matches_unjustified_when_slack_absorbed_by_cap(
 
 
 
-@pytest.mark.parametrize('width', [100, 140, 200])
+@pytest.mark.parametrize('width', [114, 140, 200])
 def test_context_bar_shares_tokens_row_left_of_skills(monkeypatch: pytest.MonkeyPatch, width: int) -> None:
     """Default layout is 2 content rows: the context bar sits on the tokens
     row, left of skills+plugins, splitting that trailing cell 50/50."""
@@ -1663,6 +1653,38 @@ def test_skills_plugins_label_over_right_half(
     sep   = lines[sep_i]
     divider = spec.rows[sep_i].downs[-1] - 1                  # 0-indexed context│skills
     assert sep.index(superscript('skills + plugins')) > divider
+
+
+@pytest.mark.parametrize('token_counts', [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize('show_cost', [False, True])
+@pytest.mark.parametrize(('width', 'split'), [(94, False), (113, False), (114, True), (174, True)])
+def test_trailing_split_threshold(
+    monkeypatch: pytest.MonkeyPatch, width: int, split: bool, show_cost: bool, token_counts: tuple[bool, bool],
+) -> None:
+    """Below TRAILING_SPLIT_MIN_BOX_W (box 114 == terminal 120) skills +
+    plugins are dropped and the context bar gets its own row; at box 114+
+    (COLUMNS 120 vs 119 is box 114 vs 113) the trailing cell is split, for
+    every token_counts mode. Every row fills the box exactly either way."""
+    from helper import strip_ansi
+    from yas.render.text import _visible_width
+    _silence_dynamic(monkeypatch)
+    monkeypatch.setattr(session_mod.Workspace, 'plugins', property(lambda self: 'foo,bar'))
+    view = SessionView(_session(), Config(show_cost=show_cost, token_counts=token_counts))
+    spec = layout.build_wide(view, _tick(), width, _r)
+    rendered = layout.render_layout(spec, _r)
+    lines = [strip_ansi(ln) for ln in rendered]
+
+    content = [row for row in spec.rows if row.kind == 'content']
+    assert len(content) == (2 if split else 3)
+    assert any('foo,bar' in ln for ln in lines) is split
+    assert all(_visible_width(ln) == width for ln in rendered)
+    # Elbows: every ┬/┼ on a separator lands on a │ in the content row below.
+    for i, row in enumerate(spec.rows[:-1]):
+        if row.kind != 'separator_dim' or spec.rows[i + 1].kind != 'content':
+            continue
+        for col, ch in enumerate(lines[i]):
+            if ch in '┬┼':
+                assert lines[i + 1][col] == '│', f'width={width}: {ch} at {col} has no │ below'
 
 
 def test_full_label_anchor_skips_elbow_split_run() -> None:

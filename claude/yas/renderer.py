@@ -86,6 +86,7 @@ from yas.constants import (
     PILL_LEFT,
     PILL_RIGHT,
     PLUGINS_TRAILING_MIN_W,
+    TRAILING_SPLIT_MIN_BOX_W,
     SEVEN_DAY_MINUTES,
     SEVEN_DAY_WARMUP_MINUTES,
     STRIKE,
@@ -1925,6 +1926,10 @@ class Renderer:
         )
         min_width_with_trailing = min_width + trailing_min + vsep_trailing_w
         include_trailing = box_width >= min_width_with_trailing
+        # Split mode is width-gated first (deterministic threshold), then by the
+        # fit guard above: below TRAILING_SPLIT_MIN_BOX_W the segment is shed.
+        if trailing_right is not None and box_width < TRAILING_SPLIT_MIN_BOX_W:
+            include_trailing = False
         if include_trailing:
             inner -= vsep_trailing_w  # the trailing segment's own vsep
 
