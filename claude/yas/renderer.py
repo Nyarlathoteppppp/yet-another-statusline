@@ -86,6 +86,7 @@ from yas.constants import (
     PILL_LEFT,
     PILL_RIGHT,
     PLUGINS_TRAILING_MIN_W,
+    SKILLS_CAPTION_FIT_W,
     TRAILING_SPLIT_MIN_BOX_W,
     SEVEN_DAY_MINUTES,
     SEVEN_DAY_WARMUP_MINUTES,
@@ -1833,10 +1834,9 @@ class Renderer:
 
         def build_lines() -> str:
             # Mirrors the tokens column's own glyph-pair convention (icon,
-            # bold value, a plain double-space gap before the next glyph
-            # pair) rather than the cost column's " / " separator, since
-            # read/changed are two independent counters (like in/out), not
-            # a session/day pair of the same counter.
+            # bold value, a plain gap before the next glyph pair), with a dim
+            # "/" between the read and changed values, joined the same way
+            # ``group`` joins a session/day pair (no surrounding spaces).
             # ``build_lines`` is only ever invoked where ``lines is not None``
             # (guarded by the caller), but mypy can't narrow a captured
             # outer-scope variable across a closure boundary — assert it here
@@ -1856,6 +1856,7 @@ class Renderer:
                 # visually separated without a bare icon slot.
                 read_icon, changed_icon = '', '  '
             return (f'{read_icon}{self.TOK}{read_s}{self.R}'
+                    f'{self.TOK_DAY_DIM}/{self.R}'
                     f'{changed_icon}{self.TOK}{changed_s}{self.R}')
 
         vsep_w          = 4
@@ -1900,7 +1901,9 @@ class Renderer:
         # LINES_SEGMENT_MIN_WIDTH — never at a width where it would overflow,
         # so ``tokens_fits`` in build_wide (gated on the WITHOUT-segment
         # min_width, below) is unaffected either way.
-        lines_w = _visible_width(build_lines()) if lines is not None else 0
+        # +1: one spare column after the content so a 6-char value plus the dim
+        # "/" never touches the divider that follows.
+        lines_w = _visible_width(build_lines()) + 1 if lines is not None else 0
         min_width_with_lines = min_width + lines_w + vsep_lines_w
         include_lines = lines is not None and box_width >= max(min_width_with_lines, LINES_SEGMENT_MIN_WIDTH)
         if include_lines:
@@ -2019,7 +2022,7 @@ class Renderer:
             trailing_col = w_middle + vsep_w + w_end + 5              # 1-indexed position of the trailing │ (today's shape)
         vsep = self.vsep_block(col1, box_width, fill=fill, leader=True)
         if include_lines:
-            lines_col  = build_lines()
+            lines_col  = build_lines() + ' '  # the spare column counted in lines_w
             vsep_lines = self.vsep_block(col2, box_width, fill=fill, leader=True)
 
         if include_trailing:
@@ -2050,6 +2053,12 @@ class Renderer:
             region_w = (box_width - 3) - (start_col - 3)
             left_w   = (region_w - vsep_trailing_w) // 2
             right_w  = region_w - vsep_trailing_w - left_w
+            # The loc cell's spare column comes out of the context bar (left),
+            # not the skills + plugins caption: when the 50/50 split would leave
+            # the caption exactly one column short of fitting, hand that column
+            # back from the left half.
+            if include_lines and right_w == SKILLS_CAPTION_FIT_W - 1:
+                left_w, right_w = left_w - 1, right_w + 1
             if left_w > 0 and right_w > 0:
                 left       = trailing_right(left_w)
                 left_vw    = _visible_width(left)

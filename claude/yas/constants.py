@@ -262,6 +262,8 @@ PLUGINS_TRAILING_MAX_W = 300
 # measured `trailing_content` width instead would shed the whole column for
 # any list wider than the free space, rather than truncating it.
 PLUGINS_TRAILING_MIN_W = 8
+# Right-half width at which the "skills + plugins" separator caption fits whole.
+SKILLS_CAPTION_FIT_W = 15
 
 # Box width at/above which the tokens row's trailing cell is split into the
 # embedded context bar (left) + skills/plugins (right). 114 == terminal width
