@@ -317,6 +317,34 @@ class RateLimits:
         )
 
 
+class Worktree:
+    """Claude Code `worktree` object; present only in a Claude worktree session."""
+    __slots__ = ('path', 'branch')
+
+    def __init__(self, path: str = '', branch: str = '') -> None:
+        self.path   = path
+        self.branch = branch
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Worktree):
+            return NotImplemented
+        return (self.path, self.branch) == (other.path, other.branch)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return f'Worktree(path={self.path!r}, branch={self.branch!r})'
+
+    @classmethod
+    def from_dict(cls, d: dict[str, object]) -> Worktree:
+        path   = d.get('path')
+        branch = d.get('branch')
+        return cls(
+            path   = _sanitize(path)   if isinstance(path, str) and path     else '',
+            branch = _sanitize(branch) if isinstance(branch, str) and branch else '',
+        )
+
+
 class SessionInfo:
     # No __slots__: a test splats **session.__dict__ to clone a SessionInfo, so
     # the instance must keep a real __dict__.
@@ -337,6 +365,7 @@ class SessionInfo:
         thinking:            Thinking | None = None,
         fast_mode:           bool = False,
         rate_limits:         RateLimits | None = None,
+        worktree:            Worktree | None = None,
     ) -> None:
         self.session_id          = session_id
         self.transcript_path     = transcript_path
@@ -352,6 +381,7 @@ class SessionInfo:
         self.thinking            = thinking if thinking is not None else Thinking()
         self.fast_mode           = fast_mode
         self.rate_limits         = rate_limits if rate_limits is not None else RateLimits()
+        self.worktree            = worktree if worktree is not None else Worktree()
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SessionInfo):
@@ -388,12 +418,18 @@ class SessionInfo:
             thinking            = Thinking.from_dict(_dict('thinking')),
             fast_mode           = bool(d.get('fast_mode', False)),
             rate_limits         = RateLimits.from_dict(_dict('rate_limits')),
+            worktree            = Worktree.from_dict(_dict('worktree')),
         )
+
+    @property
+    def effective_cwd(self) -> str:
+        """Worktree path, else workspace.current_dir, else cwd."""
+        return self.worktree.path or self.workspace.current_dir or self.cwd
 
     @property
     def short_pwd(self) -> str:
         home = str(HOME)
-        p = self.cwd
+        p = self.effective_cwd
         if p.startswith(home):
             p = '~' + p[len(home):]
         parts = p.split('/')

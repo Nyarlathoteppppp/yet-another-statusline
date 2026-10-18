@@ -71,7 +71,8 @@ class GitInfo:
     def _read_head(gitdir: str) -> tuple[str, str]:
         if not gitdir:
             return '', ''
-        head_path = Path(gitdir) / 'HEAD'
+        real      = GitInfo._real_gitdir(gitdir)
+        head_path = real / 'HEAD'
         if not head_path.is_file():
             return '', ''
         try:
@@ -92,20 +93,30 @@ class GitInfo:
         branch = _sanitize(branch)
         commit = ''
         if branch and not branch.startswith('d:'):
-            ref = Path(gitdir) / 'refs' / 'heads' / branch
+            ref = GitInfo._common_dir(real) / 'refs' / 'heads' / branch
             if ref.is_file():
                 try:
                     commit = ref.read_text().strip()[:9]
                 except OSError:
                     pass
         if not commit:
-            orig = Path(gitdir) / 'ORIG_HEAD'
+            orig = real / 'ORIG_HEAD'
             if orig.is_file():
                 try:
                     commit = orig.read_text().strip()[:9]
                 except OSError:
                     pass
         return branch, commit
+
+    @staticmethod
+    def _common_dir(real: Path) -> Path:
+        'Shared git dir holding refs; a linked worktree points at it via `commondir`.'
+        try:
+            text = (real / 'commondir').read_text().strip()
+        except OSError:
+            return real
+        target = Path(text)
+        return target if target.is_absolute() else real / target
 
     @staticmethod
     def _real_gitdir(gitdir: str) -> Path:

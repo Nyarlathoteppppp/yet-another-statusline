@@ -90,7 +90,10 @@ class SessionView:
 
     @cached_property
     def git(self) -> GitInfo:
-        return GitInfo.from_cwd(self.session.cwd, status=self.cfg.show_git_status)
+        git = GitInfo.from_cwd(self.session.effective_cwd, status=self.cfg.show_git_status)
+        if not git.branch and self.session.worktree.branch:
+            git.branch = self.session.worktree.branch
+        return git
 
     @cached_property
     def skills(self) -> LoadedSkills:
@@ -138,7 +141,7 @@ class SessionView:
 
     @cached_property
     def changes(self) -> list[tuple[str, int, int]]:
-        return OpenSpec.from_cwd(self.session.cwd, max_depth=self.cfg.openspec_scan_depth).changes
+        return OpenSpec.from_cwd(self.session.effective_cwd, max_depth=self.cfg.openspec_scan_depth).changes
 
     @cached_property
     def tool_counts(self) -> ToolCounts:
