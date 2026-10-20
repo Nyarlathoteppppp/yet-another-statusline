@@ -391,7 +391,7 @@ def _bg_init() -> dict[str, Any]:
 
 
 def _bg_fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
-    cmds = state['cmds']
+    cmds = state.setdefault('cmds', [])
     for raw in lines:
         if b'run_in_background' not in raw:
             continue
@@ -417,7 +417,7 @@ def background_commands(transcript_path: str | None, cache: TranscriptCache | No
         return set()
     try:
         st = os.stat(transcript_path) if cache is not None else None
-        return set(fold_file(cache, transcript_path, st, 'shellbg', '', _bg_init, _bg_fold)['cmds'])
+        return set(fold_file(cache, transcript_path, st, 'shellbg', '', _bg_init, _bg_fold).get('cmds', []))
     except Exception:
         return set()
 
@@ -429,7 +429,7 @@ def _flight_init() -> dict[str, Any]:
 
 
 def _flight_fold(state: dict[str, Any], lines: list[bytes]) -> dict[str, Any]:
-    calls = state['calls']
+    calls = state.setdefault('calls', {})
     for raw in lines:
         if b'"Bash"' in raw or b'tool_use_id' in raw:
             bash_inflight.fold_line(calls, raw.decode('utf-8', 'ignore'))
@@ -443,7 +443,7 @@ def main_inflight(transcript_path: str | None, cache: TranscriptCache | None = N
     try:
         st = os.stat(transcript_path) if cache is not None else None
         state = fold_file(cache, transcript_path, st, 'shellflight', '', _flight_init, _flight_fold)
-        return bash_inflight.inflight(state['calls'])
+        return bash_inflight.inflight(state.get('calls', {}))
     except Exception:
         return ()
 

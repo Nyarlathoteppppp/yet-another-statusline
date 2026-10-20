@@ -14,6 +14,7 @@ from yas.config import AgentsConfig, Config, ResourceUsageConfig, ShellCommandsC
 from yas.constants import CLR_WARN, SHELL_COL_GAP
 from yas.info import SessionView
 from yas.info.bash_inflight import fold_line, inflight
+from yas.info.parsecache import TranscriptCache
 from yas.info.shell_commands import AgentUsage, RunningShellCommands, ShellCommand, split_by_owner
 from yas.render.text import _visible_width
 from yas.tokens import TickRecord, TokenLog
@@ -333,3 +334,81 @@ def test_main_inflight_reads_the_main_transcript(tmp_path: Path) -> None:
     path = tmp_path / 't.jsonl'
     path.write_text('\n'.join([_use('t1', 'sleep 9', 5), _use('t2', 'ls', 6), _result('t2', 7)]) + '\n')
     assert [c for c, _ in main_inflight(str(path))] == ['sleep 9']
+
+
+# ---- cached fold state from an older shape --------------------------------
+
+def _fold_rec(cache: TranscriptCache, path: Path, key: str) -> dict:
+    return next(iter(cache._entries[str(path)]['fold'][key].values()))
+
+
+def test_subagent_fold_state_without_bash_is_refolded(tmp_home: Path) -> None:
+    now = time.time()
+    sdir = tmp_home / '.claude' / 'projects' / '-home-u-p' / 'sess' / 'subagents'
+    sdir.mkdir(parents=True)
+    (sdir / 'agent-a1.meta.json').write_text(json.dumps({'agentType': 'Explore', 'description': 'd'}))
+    jsonl = sdir / 'agent-a1.jsonl'
+    jsonl.write_text('\n'.join([_use('t1', 'sleep 30', now - 20)]) + '\n')
+
+    cache = TranscriptCache('sess')
+    subagents_mod.RunningSubagents.from_session('sess', '/home/u/p', now=now, cache=cache)
+
+    # Rewrite the stored entry the way a pre-`bash` build left it: no `bash`
+    # key in the state, no schema version on the record.
+    rec = _fold_rec(cache, jsonl, 'parse')
+    del rec['state']['bash']
+    del rec['ver']
+    cache.save()
+
+    reloaded = TranscriptCache.load('sess')
+    subs = subagents_mod.RunningSubagents.from_session('sess', '/home/u/p', now=now, cache=reloaded).subagents
+    assert [c for c, _ in subs[0].bash_inflight] == ['sleep 30']
+    assert 'bash' in _fold_rec(reloaded, jsonl, 'parse')['state']
+
+
+def test_subagent_fold_state_without_bash_does_not_raise_when_read_directly(tmp_home: Path) -> None:
+    now = time.time()
+    sdir = tmp_home / '.claude' / 'projects' / '-home-u-p' / 'sess' / 'subagents'
+    sdir.mkdir(parents=True)
+    (sdir / 'agent-a1.meta.json').write_text(json.dumps({'agentType': 'Explore', 'description': 'd'}))
+    (sdir / 'agent-a1.jsonl').write_text(_use('t1', 'ls', now - 5) + '\n')
+
+    real = subagents_mod.parse_transcript_state
+
+    def old_shape(*args, **kwargs):
+        state = real(*args, **kwargs)
+        state.pop('bash', None)
+        return state
+
+    subagents_mod.parse_transcript_state = old_shape
+    try:
+        subs = subagents_mod.RunningSubagents.from_session('sess', '/home/u/p', now=now).subagents
+    finally:
+        subagents_mod.parse_transcript_state = real
+    assert subs[0].bash_inflight == ()
+
+
+def test_main_inflight_survives_cached_state_without_calls(tmp_path: Path) -> None:
+    from yas.info.shell_commands import main_inflight
+    path = tmp_path / 't.jsonl'
+    path.write_text(_use('t1', 'sleep 9', 5) + '\n')
+    cache = TranscriptCache('sess')
+    assert [c for c, _ in main_inflight(str(path), cache)] == ['sleep 9']
+
+    _fold_rec(cache, path, 'shellflight')['state'].clear()
+    with path.open('a') as f:
+        f.write(_use('t2', 'sleep 8', 6) + '\n')
+    assert [c for c, _ in main_inflight(str(path), cache)] == ['sleep 8']
+
+
+def test_background_commands_survive_cached_state_without_cmds(tmp_path: Path) -> None:
+    from yas.info.shell_commands import background_commands
+    path = tmp_path / 't.jsonl'
+    path.write_text(_use('t1', 'sleep 1', 5, bg=True) + '\n')
+    cache = TranscriptCache('sess')
+    assert background_commands(str(path), cache) == {'sleep 1'}
+
+    _fold_rec(cache, path, 'shellbg')['state'].clear()
+    with path.open('a') as f:
+        f.write(_use('t2', 'sleep 2', 6, bg=True) + '\n')
+    assert background_commands(str(path), cache) == {'sleep 2'}

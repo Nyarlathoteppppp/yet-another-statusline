@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from yas.constants import _sanitize, last_prompt_path, projects_dir, subagent_is_terminal, subagent_status
+from yas.constants import PARSE_FOLD_VERSION, _sanitize, last_prompt_path, projects_dir, subagent_is_terminal, subagent_status
 from yas.info.bash_inflight import fold_line as bash_fold_line, inflight as bash_inflight
 from yas.info.parsecache import fold_file
 
@@ -599,7 +599,7 @@ def parse_transcript_state(
             return None
     return fold_file(
         cache, str(jsonl), st, 'parse', repr(float(resume_after)),
-        lambda: _parse_init(resume_after), _parse_fold,
+        lambda: _parse_init(resume_after), _parse_fold, PARSE_FOLD_VERSION,
     )
 
 
@@ -1207,7 +1207,7 @@ class RunningSubagents:
                 billed_in, cache_read_in, output, first_ts, model, last_activity, transcript_end_ts, parsed_run_start = (
                     _EMPTY_PARSE if walk is None else _parse_result(walk, use_totals_only)
                 )
-                bash_calls = bash_inflight(walk['bash']) if walk is not None else ()
+                bash_calls = bash_inflight(walk.get('bash', {})) if walk is not None else ()
 
                 # Mark as terminal in cache if conclusively retired.
                 if cache is not None and _conclusively_retired(now, status, end_ts, mtime):
